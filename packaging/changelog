@@ -1,0 +1,8 @@
+crabture (@VERSION@) unstable; urgency=medium
+
+  * Debian package of Crabture.
+  * Screen capture (region, fullscreen, active window, monitor, scrolling),
+    new annotation tools, image effects and an optional sensitive-data
+    scanner for redaction.
+
+ -- Crabture maintainers <noreply@example.invalid>  @DATE@

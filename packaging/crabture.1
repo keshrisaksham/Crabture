@@ -1,0 +1,86 @@
+.TH CRABTURE 1 "" "crabture @VERSION@" "User Commands"
+.SH NAME
+crabture \- screenshot capture, annotation and image management
+.SH SYNOPSIS
+.B crabture
+[\fIOPTIONS\fR] [\fIIMAGE\fR]
+.br
+.B crabture
+.B \-\-capture
+.I MODE
+[\fB\-\-delay\fR \fISECONDS\fR] [\fB\-\-no\-hide\fR]
+.br
+.B crabture
+.B \-\-directory
+.I DIR
+.SH DESCRIPTION
+.B Crabture
+is a lightweight screenshot tool and image annotator for Linux. It can
+capture the screen, annotate images with arrows, shapes, text, numbered
+steps, blur and pixelation, apply image effects, and browse and bulk-rename
+the images in a folder.
+.PP
+If
+.I IMAGE
+is given, it is opened in the editor on start-up.
+.SH OPTIONS
+.TP
+.I IMAGE
+Image file to open on launch.
+.TP
+.BR \-d ", " \-\-directory " " \fIDIR\fR
+Populate the gallery with the images in
+.I DIR
+(default: \fI~/Downloads/Crabshots\fR).
+.TP
+.BI \-\-capture " MODE"
+Take a screenshot on start-up and open it in the editor.
+.I MODE
+is one of
+.BR region ,
+.BR fullscreen ,
+.BR window ,
+.B monitor
+or
+.BR scroll .
+.TP
+.BI \-\-delay " SECONDS"
+Wait
+.I SECONDS
+before capturing.
+.TP
+.B \-\-no\-hide
+Do not hide the Crabture window while capturing.
+.TP
+.B \-\-register\-hotkeys
+Register Crabture capture shortcuts as GNOME custom keyboard shortcuts
+(requires
+.BR gsettings (1)).
+Existing shortcuts are not overwritten.
+.TP
+.B \-\-unregister\-hotkeys
+Remove the shortcuts added by
+.BR \-\-register\-hotkeys .
+.TP
+.B \-\-backend\-info
+Print which screen-capture backend Crabture would use on this system and exit.
+.TP
+.B \-\-version
+Print the version and exit.
+.TP
+.BR \-h ", " \-\-help
+Show a help message and exit.
+.SH FILES
+.TP
+.I ~/Downloads/Crabshots
+Default folder for captures and for the gallery.
+.SH ENVIRONMENT
+Crabture detects the session type (X11 or Wayland). On Wayland, screenshots
+are taken through the xdg-desktop-portal Screenshot interface; on X11 the Qt
+grab or an installed helper such as
+.BR maim (1)
+is used.
+.SH SEE ALSO
+.BR tesseract (1),
+.BR gsettings (1),
+.BR xdotool (1)

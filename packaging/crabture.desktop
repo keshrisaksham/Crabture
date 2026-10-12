@@ -1,0 +1,27 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Crabture
+GenericName=Screenshot & Image Editor
+Comment=Capture, annotate and edit screenshots
+Exec=crabture %f
+Icon=crabture
+Terminal=false
+Categories=Graphics;2DGraphics;Photography;Utility;
+Keywords=screenshot;capture;annotate;image;editor;sharex;
+StartupNotify=true
+StartupWMClass=crabture
+MimeType=image/png;image/jpeg;image/jpg;image/bmp;image/webp;image/gif;image/tiff;image/x-png;image/pjpeg;
+Actions=CaptureRegion;CaptureFullscreen;CaptureWindow;
+
+[Desktop Action CaptureRegion]
+Name=Capture Region
+Exec=crabture --capture region
+
+[Desktop Action CaptureFullscreen]
+Name=Capture Fullscreen
+Exec=crabture --capture fullscreen
+
+[Desktop Action CaptureWindow]
+Name=Capture Active Window
+Exec=crabture --capture window

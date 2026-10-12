@@ -1,0 +1,19 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "remove" ] || [ "$1" = "purge" ] || [ "$1" = "upgrade" ] || [ "$1" = "disappear" ]; then
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database -q /usr/share/applications || true
+    fi
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        gtk-update-icon-cache -q -f -t /usr/share/icons/hicolor || true
+    fi
+fi
+
+# Python bytecode caches are not owned by the package; drop them on removal.
+if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
+    find /usr/lib/crabture -depth -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+    find /usr/lib/crabture -depth -type d -empty -delete 2>/dev/null || true
+fi
+
+exit 0

@@ -1,510 +1,639 @@
 """
-ui.py — CrabtureMainWindow: the main GUI shell.
+ui/window.py — CrabtureMainWindow: the main GUI shell.
 
-Main window with:
-  • Left dock   – tool palette + color palette
-  • Right dock  – layer manager panel
-  • Bottom dock – image gallery populated by QFileSystemWatcher
-  • Top toolbar – zoom controls, clipboard button, theme toggle
-  • Central     – EditorContainer canvas
-  • Menubar     – File / Edit / View
+Layout
+  • Top toolbar    – file / edit / capture / effects actions, theme and help menus
+  • Left tool rail – every annotation tool (ui/toolrail.py)
+  • Centre         – a stack: welcome page (no image) or the canvas
+  • Right panel    – Properties on top; Layers | Gallery tabs below (ui/panels.py)
+  • Status bar     – message, image info, capture backend, zoom controls
 
-V2 additions:
-  • Color swatch row + custom color button
-  • Zoom slider + Fit / +/- buttons
-  • Copy-to-Clipboard toolbar button
-  • Magnifier & Speech Balloon tool buttons
-  • Light/Dark theme toggle
+The visual language comes from ui/theme.py (stylesheet roles) and ui/icons.py
+(vector icons).  Behaviour that other modules rely on — capture flow,
+unsaved-changes guard, effects, opt-in sensitive-data scan, Power Rename —
+lives here.
 """
 
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import QSize, Qt, pyqtSlot
-from PyQt6.QtGui import (
-    QAction,
-    QColor,
-    QIcon,
-    QKeySequence,
-    QPixmap,
-)
+from PyQt6.QtCore import QSettings, QSize, Qt, QTimer, QUrl, pyqtSlot
+from PyQt6.QtGui import QAction, QActionGroup, QColor, QIcon, QKeySequence, QPixmap
 from PyQt6.QtWidgets import (
-    QAbstractItemView,
     QApplication,
-    QColorDialog,
-    QDockWidget,
     QFileDialog,
+    QFrame,
+    QGraphicsTextItem,
     QHBoxLayout,
     QLabel,
-    QListWidget,
-    QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
-    QPushButton,
     QSizePolicy,
     QSlider,
+    QSplitter,
+    QStackedWidget,
+    QTabWidget,
     QToolBar,
     QToolButton,
     QVBoxLayout,
     QWidget,
 )
-from PyQt6.QtCore import QFileSystemWatcher
 
-from canvas import EditorContainer
+from crabture.ui import icons
+from crabture.settings import keymap
+from crabture.ui import theme
+from crabture.settings import tool_config
+from crabture.editor.canvas import EditorContainer
+from crabture.resources import get_resource
+from crabture.ui.common import SUPPORTED_EXTENSIONS as _DEFAULT_EXTENSIONS
+from crabture.ui.common import divider, set_role
+from crabture.ui.dialogs import AboutDialog, ShortcutsDialog
+from crabture.ui.panels import GalleryPanel, LayersPanel, PropertiesPanel
+from crabture.ui.stickers import STICKERS, pick_sticker
+from crabture.ui.toolrail import ToolRail
+from crabture.ui.welcome import WelcomePage
 
 # Directory to watch.
 CRABSHOTS_DIR = os.path.expanduser("~/Downloads/Crabshots")
-SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".gif", ".tiff"}
+SUPPORTED_EXTENSIONS = set(_DEFAULT_EXTENSIONS)
 
-# Preset swatch colors.
-SWATCH_COLORS = [
-    "#FF4444", "#FF9800", "#FFEB3B", "#4CAF50",
-    "#2196F3", "#9C27B0", "#FFFFFF", "#1E1E1E",
-]
+IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.bmp *.webp *.gif *.tiff)"
+ICON = 20          # toolbar icon size
 
-
-# =========================================================================
-#  Color palette widget
-# =========================================================================
-
-class _ColorPalette(QWidget):
-    """A compact grid of color swatches + a Custom button."""
-
-    def __init__(self, editor: EditorContainer, parent=None) -> None:
-        super().__init__(parent)
-        self._editor = editor
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(2, 8, 2, 8)
-        layout.setSpacing(10)
-
-        # We can use a small grid for colors. 2 items per row.
-        from PyQt6.QtWidgets import QGridLayout
-        cgrid = QGridLayout()
-        cgrid.setSpacing(6)
-        cgrid.setContentsMargins(0, 0, 0, 0)
-        
-        row, col = 0, 0
-        for hex_color in SWATCH_COLORS:
-            btn = QPushButton()
-            btn.setFixedSize(18, 18)
-            btn.setStyleSheet(f"""
-                QPushButton {{
-                    background: {hex_color};
-                    border: 1px solid rgba(0,0,0,0.15);
-                    border-radius: 9px;
-                }}
-                QPushButton:hover {{
-                    border: 2px solid #4A6CF7;
-                }}
-            """)
-            btn.setToolTip(hex_color)
-            btn.clicked.connect(lambda checked, c=hex_color: self._pick(c))
-            cgrid.addWidget(btn, row, col, Qt.AlignmentFlag.AlignCenter)
-            col += 1
-            if col > 1:
-                col = 0
-                row += 1
-                
-        # Custom color button
-        custom_btn = QPushButton("🖌️")
-        custom_btn.setFixedSize(42, 22)
-        custom_btn.setToolTip("Custom Color")
-        custom_btn.setStyleSheet("""
-            QPushButton {
-                background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #FFD1E8, stop:0.5 #D1E8FF, stop:1 #E8FFD1);
-                border: 1px solid rgba(0,0,0,0.2);
-                border-radius: 11px;
-                font-size: 16px;
-            }
-            QPushButton:hover {
-                border-color: #4A6CF7;
-            }
-        """)
-        custom_btn.clicked.connect(self._custom)
-        cgrid.addWidget(custom_btn, row, 0, 1, 2, Qt.AlignmentFlag.AlignCenter)
-        
-        layout.addLayout(cgrid)
-
-        # -- Opacity slider ------------------------------------------------
-        from PyQt6.QtWidgets import QSlider
-        self._alpha_slider = QSlider(Qt.Orientation.Horizontal)
-        self._alpha_slider.setRange(0, 255)
-        self._alpha_slider.setValue(255)
-        self._alpha_slider.setFixedWidth(42)
-        self._alpha_slider.setToolTip("Brush Opacity")
-        self._alpha_slider.setObjectName("alpha_slider")
-        self._alpha_slider.valueChanged.connect(self._on_alpha)
-        
-        layout.addWidget(self._alpha_slider, 0, Qt.AlignmentFlag.AlignCenter)
-
-    def _pick(self, hex_color: str) -> None:
-        self._editor.set_active_color(QColor(hex_color))
-
-    def _custom(self) -> None:
-        color = QColorDialog.getColor(self._editor.active_color(), self, "Pick Color")
-        if color.isValid():
-            self._editor.set_active_color(color)
-
-    def _on_alpha(self, value: int) -> None:
-        self._editor.set_active_alpha(value)
-
-
-# =========================================================================
-#  Tool palette widget
-# =========================================================================
-
-class _ToolPalette(QWidget):
-    """A vertical column of tool buttons, using only icons."""
-
-    TOOLS = [
-        ("select",    "🖱️", "Select"),
-        ("arrow",     "➜", "Arrow"),
-        ("rectangle", "▭", "Rectangle"),
-        ("highlight", "🖍️", "Highlight"),
-        ("pixelate",  "▦", "Pixelate"),
-        ("text",      "𝐓", "Text"),
-        ("crop",      "✂", "Crop"),
-        ("magnifier", "🔍", "Magnifier"),
-        ("balloon",   "💬", "Speech Balloon"),
-    ]
-
-    def __init__(self, editor: EditorContainer, parent=None) -> None:
-        super().__init__(parent)
-        self._editor = editor
-        from PyQt6.QtWidgets import QGridLayout
-        layout = QGridLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(4)
-        self._buttons: dict[str, QPushButton] = {}
-
-        row = col = 0
-        for tool_id, icon, name in self.TOOLS:
-            btn = QPushButton(icon)
-            btn.setCheckable(True)
-            btn.setFixedSize(36, 36)
-            btn.setToolTip(name)
-            btn.setObjectName(f"tool_{tool_id}")
-            btn.clicked.connect(lambda checked, t=tool_id: self._on_tool(t))
-            layout.addWidget(btn, row, col)
-            self._buttons[tool_id] = btn
-            col += 1
-            if col > 1:
-                col = 0
-                row += 1
-
-        layout.setRowStretch(row + 1, 1)
-        self._buttons["select"].setChecked(True)
-        self._editor.tool_changed.connect(self._sync)
-
-    def _on_tool(self, tool_id: str) -> None:
-        self._editor.set_tool(tool_id)
-
-    @pyqtSlot(str)
-    def _sync(self, tool_id: str) -> None:
-        for tid, btn in self._buttons.items():
-            btn.setChecked(tid == tool_id)
-
-
-# =========================================================================
-#  Layer panel widget
-# =========================================================================
-
-class _LayerPanel(QWidget):
-    """Layer list with management buttons."""
-
-    def __init__(self, editor: EditorContainer, parent=None) -> None:
-        super().__init__(parent)
-        self._editor = editor
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
-
-        # Button row
-        btn_row = QHBoxLayout()
-        self._btn_add = QPushButton("＋")
-        self._btn_del = QPushButton("🗑")
-        self._btn_up = QPushButton("▲")
-        self._btn_down = QPushButton("▼")
-        self._btn_vis = QPushButton("👁")
-        for b in (self._btn_add, self._btn_del, self._btn_up, self._btn_down, self._btn_vis):
-            b.setFixedSize(32, 32)
-            b.setObjectName("layer_btn")
-            btn_row.addWidget(b)
-        btn_row.addStretch()
-        layout.addLayout(btn_row)
-
-        # Layer list
-        self._list = QListWidget()
-        self._list.setObjectName("layer_list")
-        self._list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        layout.addWidget(self._list)
-
-        # Connections
-        self._btn_add.clicked.connect(self._add_layer)
-        self._btn_del.clicked.connect(self._del_layer)
-        self._btn_up.clicked.connect(self._move_up)
-        self._btn_down.clicked.connect(self._move_down)
-        self._btn_vis.clicked.connect(self._toggle_vis)
-        self._editor.layers_changed.connect(self.refresh)
-
-        self.refresh()
-
-    def refresh(self) -> None:
-        self._list.clear()
-        for lid, name, visible in self._editor.layer_manager.layer_names():
-            prefix = "👁 " if visible else "🚫 "
-            item = QListWidgetItem(prefix + name)
-            item.setData(Qt.ItemDataRole.UserRole, lid)
-            self._list.addItem(item)
-
-    def _selected_lid(self) -> Optional[str]:
-        cur = self._list.currentItem()
-        return cur.data(Qt.ItemDataRole.UserRole) if cur else None
-        
-    def _selected_lids(self) -> list[str]:
-        return [item.data(Qt.ItemDataRole.UserRole) for item in self._list.selectedItems()]
-
-    def _add_layer(self) -> None:
-        idx = self._list.count() + 1
-        self._editor.layer_manager.add_layer(f"Layer {idx}")
-        self._editor.layers_changed.emit()
-
-    def _del_layer(self) -> None:
-        lids = self._selected_lids()
-        if not lids:
-            return
-        scene = self._editor.scene()
-        for lid in lids:
-            items = self._editor.layer_manager.delete_layer(lid)
-            for item in items:
-                if scene:
-                    scene.removeItem(item)
-        self._editor.layers_changed.emit()
-
-    def _move_up(self) -> None:
-        lid = self._selected_lid()
-        if lid:
-            self._editor.layer_manager.move_layer_up(lid)
-            self._editor.layers_changed.emit()
-
-    def _move_down(self) -> None:
-        lid = self._selected_lid()
-        if lid:
-            self._editor.layer_manager.move_layer_down(lid)
-            self._editor.layers_changed.emit()
-
-    def _toggle_vis(self) -> None:
-        lid = self._selected_lid()
-        if lid:
-            self._editor.layer_manager.toggle_visibility(lid)
-            self._editor.layers_changed.emit()
-
-
-# =========================================================================
-#  CrabtureMainWindow
-# =========================================================================
 
 class CrabtureMainWindow(QMainWindow):
     """Main application window for Crabture."""
 
     def __init__(self, initial_image: str | None = None, initial_directory: str | None = None) -> None:
         super().__init__()
-        self.setWindowTitle("Crabture — Image Editor")
-        from main import get_resource
+        self._base_title = "Crabture"
+        self.setWindowTitle(self._base_title)
         self.setWindowIcon(QIcon(get_resource("logo.png")))
         self.resize(1280, 820)
-        self._is_dark = False  # current theme state (default: light)
+        self.setMinimumSize(900, 600)
+        self.setAcceptDrops(True)
 
-        # -- Central editor ------------------------------------------------
+        # Screen capture state (CaptureService is created lazily).
+        self._capture = None
+        self._capture_menu: Optional[QMenu] = None
+        self._quit_if_capture_ends = False   # launched via `crabture --capture`
+        qs = QSettings()
+        self._cap_delay = float(qs.value("capture/delay", 0.0) or 0.0)
+        self._cap_hide = str(qs.value("capture/hide", "true")).lower() != "false"
+        self._cap_clipboard = str(qs.value("capture/clipboard", "false")).lower() == "true"
+        self._side_panel_wanted = str(qs.value("ui/side_panel", "true")).lower() != "false"
+        self._watched_dir: str = CRABSHOTS_DIR
+        self._settings_dlg = None            # single SettingsDialog instance (created lazily)
+        self._did_first_show = False         # Crabture always starts maximized
+        # keymap id -> QAction; shortcuts and tooltips follow keymap live.
+        self._keyed_actions: dict[str, QAction] = {}
+        self._tip_base: dict[QAction, str] = {}
+
+        # -- Core widgets --------------------------------------------------
         self._editor = EditorContainer(self)
-        self.setCentralWidget(self._editor)
-
-        # -- Dock: Tool palette + color palette (left) --------------------
-        tool_dock = QDockWidget("Tools", self)
-        tool_dock.setFeatures(
-            QDockWidget.DockWidgetFeature.DockWidgetMovable
-            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+        self._editor.modified_changed.connect(self._update_title)
+        self._editor.color_picked.connect(
+            lambda c: self.statusBar().showMessage(f"Picked colour {c.name().upper()}")
         )
-        tool_container = QWidget()
-        tool_layout = QVBoxLayout(tool_container)
-        tool_layout.setContentsMargins(0, 0, 0, 0)
-        tool_layout.setSpacing(0)
-        tool_layout.addWidget(self._build_left_actions())
-        tool_layout.addWidget(_ToolPalette(self._editor))
-        tool_layout.addWidget(_ColorPalette(self._editor))
-        tool_dock.setWidget(tool_container)
-        tool_dock.setMinimumWidth(60)
-        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, tool_dock)
+        theme.signals.changed.connect(lambda _n: self._editor.apply_theme_colors())
 
-        # -- Dock: Gallery (top right) ------------------------------------
-        self._gallery_dock = QDockWidget("Gallery", self)
-        self._gallery_dock.setFeatures(
-            QDockWidget.DockWidgetFeature.DockWidgetMovable
-            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
-        )
-        
-        gallery_container = QWidget()
-        gallery_layout = QVBoxLayout(gallery_container)
-        gallery_layout.setContentsMargins(0, 0, 0, 0)
-        gallery_layout.setSpacing(0)
-        
-        # Controls setup
-        g_ctrl_widget = QWidget()
-        g_ctrl_widget.setStyleSheet("background: rgba(255,255,255,0.4); border-bottom: 1px solid rgba(0,0,0,0.1);")
-        g_ctrl_layout = QHBoxLayout(g_ctrl_widget)
-        g_ctrl_layout.setContentsMargins(4, 4, 4, 4)
-        
-        self._thumb_size = 120
-        self._is_list_view = True
-        self._thumb_size_slider = QSlider(Qt.Orientation.Horizontal)
-        self._thumb_size_slider.setRange(40, 200)
-        self._thumb_size_slider.setValue(self._thumb_size)
-        self._thumb_size_slider.setToolTip("Thumbnail Size")
-        self._thumb_size_slider.valueChanged.connect(self._on_thumb_scale)
-        
-        size_lbl = QLabel("Size:")
-        size_lbl.setStyleSheet("font-size: 11px;")
-        g_ctrl_layout.addWidget(size_lbl)
-        g_ctrl_layout.addWidget(self._thumb_size_slider)
-        
-        self._list_view_btn = QPushButton("📄 List")
-        self._list_view_btn.setCheckable(True)
-        self._list_view_btn.setChecked(True)
-        self._list_view_btn.setFixedSize(48, 20)
-        self._list_view_btn.setStyleSheet("font-size: 10px;")
-        self._list_view_btn.clicked.connect(self._toggle_gallery_view)
-        g_ctrl_layout.addWidget(self._list_view_btn)
-        
-        gallery_layout.addWidget(g_ctrl_widget)
-
-        self._gallery = QListWidget()
-        self._gallery.setViewMode(QListWidget.ViewMode.ListMode)
-        self._gallery.setIconSize(QSize(self._thumb_size, int(self._thumb_size * 0.75)))
-        self._gallery.setResizeMode(QListWidget.ResizeMode.Adjust)
-        self._gallery.setSpacing(8)
-        self._gallery.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._gallery.setMovement(QListWidget.Movement.Static)
-        self._gallery.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self._gallery.setObjectName("gallery")
-        self._gallery.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self._gallery.customContextMenuRequested.connect(self._show_gallery_context_menu)
-        self._gallery.itemClicked.connect(self._on_gallery_click)
-        gallery_layout.addWidget(self._gallery)
-        
-        self._gallery_dock.setWidget(gallery_container)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._gallery_dock)
-
-        # -- Dock: Layers (bottom right) ----------------------------------
-        layer_dock = QDockWidget("Layers", self)
-        layer_dock.setFeatures(
-            QDockWidget.DockWidgetFeature.DockWidgetMovable
-            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
-        )
-        layer_dock.setWidget(_LayerPanel(self._editor))
-        layer_dock.setMinimumWidth(180)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, layer_dock)
-        
-        # Split right docks vertically
-        self.splitDockWidget(self._gallery_dock, layer_dock, Qt.Orientation.Vertical)
-
-        # -- Menubar & Status bar ------------------------------------------
+        self._build_actions()
+        self._apply_shortcuts()
+        self._build_central()
+        self._build_toolbar()
         self._build_menu()
         self._build_status_bar()
+        self._connect_signals()
 
-        # -- File watcher --------------------------------------------------
-        self._watcher: Optional[QFileSystemWatcher] = None
-        self._watched_dir: str = CRABSHOTS_DIR
-        # Honour --directory flag: watch the requested directory instead.
+        # -- Gallery / watcher --------------------------------------------
+        self._gallery = self._gallery_panel.list
         start_dir = initial_directory if initial_directory else CRABSHOTS_DIR
         self.watch_directory(start_dir)
 
-    # =================================================================
-    #  UI Builders
-    # =================================================================
+        self._set_page(False)
+        self._restore_state()
+        self._refresh_enabled()
+        self._update_image_chip()
+        self._refresh_title()
+        keymap.signals.changed.connect(self._apply_shortcuts)
 
-    def _build_left_actions(self) -> QWidget:
-        container = QWidget()
-        from PyQt6.QtWidgets import QGridLayout
-        layout = QGridLayout(container)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(4)
-        
-        actions = [
-            ("↩", "Undo (Ctrl+Z)", self._editor.undo),
-            ("↪", "Redo (Ctrl+Y)", self._editor.redo),
-            ("📂", "Open image (Ctrl+O)", self._on_open),
-            ("💾", "Save (Ctrl+S)", self._on_save),
-            ("📋", "Copy to Clipboard", self._on_copy_clipboard),
-            ("📤", "Export As", self._on_save_as),
-        ]
-        
-        row = col = 0
-        for icon, tooltip, func in actions:
-            btn = QPushButton(icon)
-            btn.setFixedSize(36, 36)
-            btn.setToolTip(tooltip)
-            btn.setObjectName("tool_action")
-            btn.clicked.connect(func)
-            layout.addWidget(btn, row, col)
-            col += 1
-            if col > 1:
-                col = 0
-                row += 1
-            
-        return container
+    # =====================================================================
+    #  Actions (shared by toolbar and menus)
+    # =====================================================================
+
+    def _act(self, text: str, icon_name: str | None, shortcut: str | None, slot, tip: str | None = None,
+             checkable: bool = False, key_id: str | None = None, tooltip: str | None = None) -> QAction:
+        """Create an action.  *key_id* (a keymap id) makes its shortcut and
+        tooltip follow the user's configuration; *shortcut* is then ignored."""
+        act = QAction(text.replace("&", ""), self)
+        act.setText(text)
+        if icon_name:
+            icons.bind_icon(act, icon_name, ICON)
+        act.setToolTip(tooltip or tip or text.replace("&", "").rstrip("…"))
+        self._tip_base[act] = tooltip or tip or text.replace("&", "").rstrip("…")
+        act.setStatusTip(tip or "")
+        act.setCheckable(checkable)
+        if key_id:
+            self._keyed_actions[key_id] = act
+        elif shortcut:
+            act.setShortcut(QKeySequence(shortcut))
+            act.setToolTip(f"{self._tip_base[act]} ({shortcut})")
+        if slot is not None:
+            act.triggered.connect(lambda _checked=False, s=slot: s())
+        return act
+
+    def _apply_shortcuts(self, _changed: str = "") -> None:
+        """(Re)assign every keyed action's shortcut and tooltip from keymap."""
+        used: set[str] = set()
+        for key_id, act in self._keyed_actions.items():
+            seq = keymap.get(key_id)
+            norm = QKeySequence(seq).toString() if seq else ""
+            if norm and norm in used:
+                # keymap.conflicts() prevents this; never create an ambiguous shortcut anyway.
+                seq, norm = "", ""
+            if norm:
+                used.add(norm)
+            act.setShortcut(QKeySequence(seq) if seq else QKeySequence())
+            base = self._tip_base.get(act, act.text().replace("&", ""))
+            act.setToolTip(f"{base} ({seq})" if seq else base)
+        if hasattr(self, "_tb_capture"):
+            self._tb_capture_act.setToolTip(self._tb_capture_tip())
+
+    def _tb_capture_tip(self) -> str:
+        seq = keymap.get("action.capture_region")
+        return "Capture a region (arrow: other capture modes)" + (f" ({seq})" if seq else "")
+
+    def _build_actions(self) -> None:
+        ed = self._editor
+        self.act_open = self._act("&Open Image…", "open", None, self._on_open, "Open an image", key_id="action.open")
+        self.act_open_folder = self._act("Open &Folder…", "folder", None, self._on_open_folder,
+                                         "Show a folder in the gallery", key_id="action.open_folder")
+        self.act_close = self._act("&Close Image", "close", None, self.close_image, "Close the image",
+                                   key_id="action.close_image")
+        self.act_save = self._act("&Save (Overwrite)", "save", None, self._on_save, "Save the image",
+                                  key_id="action.save")
+        self.act_save_as = self._act("Save &As…", "save_as", None, self._on_save_as,
+                                     "Save to a new file", key_id="action.save_as")
+        self.act_copy = self._act("&Copy to Clipboard", "copy", None, self._on_copy_clipboard,
+                                  "Copy the image to the clipboard", key_id="action.copy")
+        self.act_quit = self._act("&Quit", None, None, self.close, "Quit Crabture", key_id="action.quit")
+
+        self.act_undo = self._act("&Undo", "undo", None, ed.undo, "Undo", key_id="action.undo")
+        self.act_redo = self._act("&Redo", "redo", None, ed.redo, "Redo", key_id="action.redo")
+        self.act_delete = self._act("&Delete Selected", "trash", None, self._on_delete_selected,
+                                    "Delete the selected annotation", key_id="action.delete")
+        # Only fire the shortcut while the canvas has focus (not the gallery,
+        # layer list or dialogs); the menu entry still works everywhere.
+        self.act_delete.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        ed.addAction(self.act_delete)
+        self.act_effects = self._act("Image &Effects…", "effects", None, self._on_effects,
+                                     "Borders, shadow, torn edge, watermark, background",
+                                     key_id="action.effects")
+        # Sensitive data is split in two: Configure once, then Run with one click.
+        self.act_sensitive_run = self._act(
+            "&Run Sensitive-Data Scan", "shield", None, self._on_run_sensitive,
+            "Scan with your saved sensitive-data settings",
+            key_id="action.sensitive_run",
+            tooltip="Run Sensitive-Data Scan — runs your saved settings (Configure ▸ Sensitive Data). "
+                    "You review the findings before anything is applied.")
+        self.act_sensitive = self.act_sensitive_run      # backwards-compatible name
+        self.act_sensitive_configure = self._act(
+            "Configure &Sensitive Data…", "settings", None, self._on_configure_sensitive,
+            "Choose what the scan looks for and how it redacts", key_id="action.sensitive_configure")
+        self.act_rename = self._act("Power &Rename…", "rename", None, self._on_rename_action,
+                                    "Bulk-rename the files selected in the gallery", key_id="action.rename")
+        self.act_undo_rename = self._act("Undo Last Re&name", "history", None, self._on_undo_last_rename,
+                                         "Restore the file names from the last Power Rename",
+                                         key_id="action.undo_rename")
+        self.act_sticker = self._act("Choose Stic&ker…", "sticker", None,
+                                     lambda: pick_sticker(self._editor, self), "Choose the sticker emoji",
+                                     key_id="action.choose_sticker")
+        self.act_steps = self._act("Reset Step &Counter", "step", None, ed.reset_step_counter,
+                                   "Number the next step marker 1 again", key_id="action.reset_steps")
+
+        self.act_zoom_in = self._act("Zoom &In", "zoom_in", None, ed.zoom_in, key_id="action.zoom_in")
+        self.act_zoom_out = self._act("Zoom &Out", "zoom_out", None, ed.zoom_out, key_id="action.zoom_out")
+        self.act_fit = self._act("&Fit to Window", "fit", None, ed.reset_zoom, key_id="action.fit")
+        self.act_actual = self._act("&Actual Size", "actual_size", None, lambda: ed.update_zoom_slider(100),
+                                    key_id="action.actual_size")
+        self.act_side = self._act("Toggle Side &Panel", "layers", None, None, "Show or hide the side panel",
+                                  checkable=True, key_id="action.toggle_panel")
+        self.act_side.setChecked(self._side_panel_wanted)
+        self.act_side.toggled.connect(self._on_side_toggled)
+
+        self.act_shortcuts = self._act("&Keyboard Shortcuts", "keyboard", None, self._show_shortcuts,
+                                       key_id="action.shortcuts_help")
+        self.act_about = self._act("&About Crabture", "info", None, self._show_about)
+
+        # Configure
+        self.act_configure = self._act("&Preferences…", "settings", None,
+                                       lambda: self._open_settings(None),
+                                       "Open the configuration window", key_id="action.configure")
+        self.act_cfg_shortcuts = self._act("&Keyboard Shortcuts…", "keyboard", None,
+                                           lambda: self._open_settings("shortcuts"),
+                                           "Change tool keys and menu shortcuts")
+        self.act_cfg_tools = self._act("&Tool Settings…", "wand", None,
+                                       lambda: self._open_settings("tools"),
+                                       "Default colours, widths and sizes for each tool")
+
+        # Capture actions
+        self.capture_actions: dict[str, QAction] = {}
+        for mode, label, icon_name, tip in (
+            ("region", "&Region…", "capture_region", "Freeze the screen and drag a rectangle"),
+            ("fullscreen", "&Fullscreen", "capture_fullscreen", "All monitors"),
+            ("window", "Active &Window", "capture_window",
+             "X11: the focused window. Wayland: the system window picker"),
+            ("monitor", "&Monitor under cursor", "capture_monitor", "Only the monitor the pointer is on"),
+            ("scroll", "&Scrolling capture…", "capture_scroll",
+             "Select a region, then scroll the content; frames are stitched"),
+        ):
+            self.capture_actions[mode] = self._act(
+                label, icon_name, None, lambda m=mode: self.run_capture(m), tip,
+                key_id=f"action.capture_{mode}"
+            )
+
+    # =====================================================================
+    #  Layout
+    # =====================================================================
+
+    def _build_central(self) -> None:
+        # Pages
+        self._welcome = WelcomePage()
+        self._editor_page = QFrame()
+        self._editor_page.setObjectName("canvas_surround")
+        el = QVBoxLayout(self._editor_page)
+        el.setContentsMargins(0, 0, 0, 0)
+        el.addWidget(self._editor)
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self._welcome)
+        self._stack.addWidget(self._editor_page)
+
+        # Side panel
+        self._properties = PropertiesPanel(self._editor)
+        self._layers_panel = LayersPanel(self._editor)
+        self._gallery_panel = GalleryPanel(lambda: SUPPORTED_EXTENSIONS, CRABSHOTS_DIR)
+        self._tabs = QTabWidget()
+        self._tabs.setDocumentMode(True)
+        self._tabs.addTab(self._layers_panel, "Layers")
+        self._tabs.addTab(self._gallery_panel, "Gallery")
+
+        self._side_split = QSplitter(Qt.Orientation.Vertical)
+        self._side_split.setChildrenCollapsible(False)
+        self._side_split.addWidget(self._properties)
+        self._side_split.addWidget(self._tabs)
+        self._side_split.setStretchFactor(0, 0)
+        self._side_split.setStretchFactor(1, 1)
+        self._side_split.setSizes([260, 460])
+        # Let the Properties area follow its content until the user drags the divider.
+        self._split_user_set = False
+        self._side_split.splitterMoved.connect(lambda *_: setattr(self, "_split_user_set", True))
+        self._properties.content_height_changed.connect(self._fit_properties)
+
+        self._side_panel = QFrame()
+        self._side_panel.setObjectName("side_panel")
+        sl = QVBoxLayout(self._side_panel)
+        sl.setContentsMargins(0, 0, 0, 0)
+        sl.addWidget(self._side_split)
+        self._side_panel.setMinimumWidth(330)
+
+        self._rail = ToolRail(self._editor)
+
+        self._main_split = QSplitter(Qt.Orientation.Horizontal)
+        self._main_split.setChildrenCollapsible(False)
+        self._main_split.addWidget(self._stack)
+        self._main_split.addWidget(self._side_panel)
+        self._main_split.setStretchFactor(0, 1)
+        self._main_split.setStretchFactor(1, 0)
+        self._main_split.setSizes([900, 320])
+
+        central = QWidget()
+        h = QHBoxLayout(central)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(0)
+        h.addWidget(self._rail)
+        h.addWidget(self._main_split, 1)
+        self.setCentralWidget(central)
+
+    def _build_toolbar(self) -> None:
+        tb = QToolBar("Main", self)
+        tb.setObjectName("main_toolbar")
+        tb.setMovable(False)
+        tb.setFloatable(False)
+        tb.setIconSize(QSize(ICON, ICON))
+        tb.setContextMenuPolicy(Qt.ContextMenuPolicy.PreventContextMenu)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, tb)
+        self._toolbar = tb
+
+        self._tb_logo = QLabel()
+        self._tb_logo.setContentsMargins(6, 0, 10, 0)
+        tb.addWidget(self._tb_logo)
+        self._retint_logo()
+        theme.signals.changed.connect(lambda _n: self._retint_logo())
+
+        def btn(action: QAction) -> QToolButton:
+            b = QToolButton()
+            b.setProperty("role", "toolbar")
+            b.setDefaultAction(action)
+            b.setIconSize(QSize(ICON, ICON))
+            b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+            return b
+
+        def group(*actions: QAction) -> None:
+            for a in actions:
+                tb.addWidget(btn(a))
+
+        def sep() -> None:
+            tb.addWidget(self._spacer_divider())
+
+        group(self.act_open, self.act_save, self.act_save_as, self.act_copy)
+        sep()
+        group(self.act_undo, self.act_redo)
+        sep()
+
+        # Capture: click = region capture, arrow = full menu.
+        self._tb_capture = QToolButton()
+        self._tb_capture.setProperty("role", "toolbar")
+        self._tb_capture_act = QAction("Capture", self)
+        self._tb_capture_act.triggered.connect(lambda _=False: self.run_capture("region"))
+        self._tb_capture_act.setToolTip(self._tb_capture_tip())
+        icons.bind_icon(self._tb_capture_act, "capture", ICON)
+        self._tb_capture.setDefaultAction(self._tb_capture_act)
+        self._tb_capture.setMenu(self._get_capture_menu())
+        self._tb_capture.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self._tb_capture.setToolTip(self._tb_capture_tip())
+        self._tb_capture.setIconSize(QSize(ICON, ICON))
+        tb.addWidget(self._tb_capture)
+        sep()
+        group(self.act_effects, self.act_sensitive_run)
+
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        tb.addWidget(spacer)
+
+        # Configure button, then the theme and help menus
+        tb.addWidget(btn(self.act_configure))
+
+        # Theme menu button
+        self._theme_menu = QMenu("Theme", self)
+        self._theme_group = QActionGroup(self)
+        self._theme_actions: dict[str, QAction] = {}
+        for name, label, icon_name in (("system", "System", "settings"), ("light", "Light", "sun"),
+                                       ("dark", "Dark", "moon")):
+            a = QAction(label, self, checkable=True)
+            icons.bind_icon(a, icon_name, 16)
+            a.triggered.connect(lambda _=False, n=name: self._set_theme(n))
+            self._theme_group.addAction(a)
+            self._theme_menu.addAction(a)
+            self._theme_actions[name] = a
+        self._theme_actions.get(theme.initial_theme(), self._theme_actions["system"]).setChecked(True)
+        self._tb_theme = QToolButton()
+        self._tb_theme.setProperty("role", "toolbar")
+        self._tb_theme.setMenu(self._theme_menu)
+        self._tb_theme.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._tb_theme.setToolTip("Theme")
+        self._tb_theme.setIconSize(QSize(ICON, ICON))
+        tb.addWidget(self._tb_theme)
+        self._update_theme_icon()
+        theme.signals.changed.connect(lambda _n: self._update_theme_icon())
+
+        # Help menu button
+        self._help_menu = QMenu("Help", self)
+        self._help_menu.addAction(self.act_shortcuts)
+        self._help_menu.addAction(self.act_about)
+        tb_help = QToolButton()
+        tb_help.setProperty("role", "toolbar")
+        tb_help.setMenu(self._help_menu)
+        tb_help.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        icons.bind_icon(tb_help, "info", ICON)
+        tb_help.setToolTip("Help")
+        tb_help.setIconSize(QSize(ICON, ICON))
+        tb.addWidget(tb_help)
+
+    @staticmethod
+    def _spacer_divider() -> QWidget:
+        wrap = QWidget()
+        lay = QHBoxLayout(wrap)
+        lay.setContentsMargins(6, 6, 6, 6)
+        line = divider(vertical=True)
+        line.setFixedHeight(20)
+        lay.addWidget(line)
+        return wrap
+
+    def _retint_logo(self) -> None:
+        self._tb_logo.setPixmap(icons.pixmap("logo_mark", 22, "accent_fg"))
+
+    def _update_theme_icon(self) -> None:
+        self._tb_theme.setIcon(icons.icon("moon" if theme.current_theme() == "dark" else "sun", ICON))
+
+    def _build_menu(self) -> None:
+        mb = self.menuBar()
+
+        file_menu = mb.addMenu("&File")
+        for a in (self.act_open, self.act_open_folder, None, self.act_close, None, self.act_save,
+                  self.act_save_as, self.act_copy, None, self.act_quit):
+            file_menu.addSeparator() if a is None else file_menu.addAction(a)
+
+        self._edit_menu = mb.addMenu("&Edit")
+        for a in (self.act_undo, self.act_redo, self.act_delete, None, self.act_effects,
+                  self.act_sensitive_run, self.act_sensitive_configure, None, self.act_rename,
+                  self.act_undo_rename, None, self.act_sticker, self.act_steps):
+            self._edit_menu.addSeparator() if a is None else self._edit_menu.addAction(a)
+        self._edit_menu.aboutToShow.connect(self._refresh_rename_undo)
+
+        mb.addMenu(self._get_capture_menu())
+
+        self._configure_menu = mb.addMenu("Con&figure")
+        for a in (self.act_configure, None, self.act_cfg_shortcuts, self.act_cfg_tools,
+                  self.act_sensitive_configure):
+            self._configure_menu.addSeparator() if a is None else self._configure_menu.addAction(a)
+
+        view_menu = mb.addMenu("&View")
+        for a in (self.act_zoom_in, self.act_zoom_out, self.act_fit, self.act_actual, None, self.act_side):
+            view_menu.addSeparator() if a is None else view_menu.addAction(a)
+        view_menu.addSeparator()
+        view_menu.addMenu(self._theme_menu)
+
+        help_menu = mb.addMenu("&Help")
+        help_menu.addAction(self.act_shortcuts)
+        help_menu.addAction(self.act_about)
 
     def _build_status_bar(self) -> None:
-        self.statusBar().showMessage("Ready")
-        
-        # Container for right-aligned items
-        right_widget = QWidget()
-        right_layout = QHBoxLayout(right_widget)
-        right_layout.setContentsMargins(0, 0, 8, 0)
-        right_layout.setSpacing(8)
-        
-        # Zoom controls
-        btn_zout = QPushButton("➖")
-        btn_zout.setFixedSize(24, 24)
-        btn_zout.setToolTip("Zoom Out")
-        btn_zout.clicked.connect(self._editor.zoom_out)
-        right_layout.addWidget(btn_zout)
+        sb = self.statusBar()
+        sb.setSizeGripEnabled(False)
+        sb.showMessage("Ready")
 
+        holder = QWidget()
+        holder.setObjectName("status_bar_widget")
+        lay = QHBoxLayout(holder)
+        lay.setContentsMargins(0, 0, 8, 0)
+        lay.setSpacing(10)
+
+        # Image chip + modified dot
+        self._chip_image = QLabel("")
+        set_role(self._chip_image, "badge")
+        self._dot = QLabel("●")
+        set_role(self._dot, "warning")
+        self._dot.setToolTip("Unsaved changes")
+        self._dot.hide()
+        lay.addWidget(self._chip_image)
+        lay.addWidget(self._dot)
+
+        # Capture backend chip
+        backend = ""
+        try:
+            from crabture.capture.service import backend_info
+            backend = backend_info()
+        except Exception:
+            backend = ""
+        self._backend = backend
+        self._backend_chip = None
+        if backend:
+            chip = QLabel(backend)
+            set_role(chip, "caption")
+            chip.setToolTip("Screen-capture backend in use")
+            lay.addWidget(chip)
+            self._backend_chip = chip
+        lay.addWidget(divider(vertical=True))
+
+        # Zoom controls
+        def tbtn(action: QAction) -> QToolButton:
+            b = QToolButton()
+            b.setProperty("role", "toolbar")
+            b.setDefaultAction(action)
+            b.setIconSize(QSize(16, 16))
+            icons.bind_icon(action, action_icon[action], 16)
+            return b
+
+        action_icon = {self.act_zoom_out: "zoom_out", self.act_zoom_in: "zoom_in",
+                       self.act_fit: "fit", self.act_actual: "actual_size"}
+        # Status-bar buttons share the actions but show a smaller icon.
+        lay.addWidget(tbtn(self.act_zoom_out))
         self._zoom_slider = QSlider(Qt.Orientation.Horizontal)
         self._zoom_slider.setRange(10, 400)
         self._zoom_slider.setValue(100)
-        self._zoom_slider.setFixedWidth(100)
+        self._zoom_slider.setFixedWidth(110)
+        self._zoom_slider.setToolTip("Zoom")
         self._zoom_slider.valueChanged.connect(self._on_zoom_slider)
-        right_layout.addWidget(self._zoom_slider)
-
-        btn_zin = QPushButton("➕")
-        btn_zin.setFixedSize(24, 24)
-        btn_zin.setToolTip("Zoom In")
-        btn_zin.clicked.connect(self._editor.zoom_in)
-        right_layout.addWidget(btn_zin)
-
-        self._zoom_label = QLabel(" 100%")
-        self._zoom_label.setFixedWidth(40)
-        right_layout.addWidget(self._zoom_label)
-
-        btn_fit = QPushButton("Fit")
-        btn_fit.setFixedSize(32, 24)
-        btn_fit.clicked.connect(self._editor.fit_to_screen)
-        right_layout.addWidget(btn_fit)
-
-        # Theme toggle
-        self._theme_btn = QPushButton("🌙 Dark")
-        self._theme_btn.setObjectName("theme_btn")
-        self._theme_btn.setFixedSize(100, 24)
-        self._theme_btn.setToolTip("Switch theme")
-        self._theme_btn.clicked.connect(self._toggle_theme)
-        right_layout.addWidget(self._theme_btn)
-        
-        self.statusBar().addPermanentWidget(right_widget)
-        
+        lay.addWidget(self._zoom_slider)
+        lay.addWidget(tbtn(self.act_zoom_in))
+        self._zoom_label = QLabel("100%")
+        self._zoom_label.setFixedWidth(44)
+        self._zoom_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        lay.addWidget(self._zoom_label)
+        lay.addWidget(tbtn(self.act_fit))
+        lay.addWidget(tbtn(self.act_actual))
+        sb.addPermanentWidget(holder)
         self._editor.zoom_changed.connect(self._sync_zoom_ui)
+
+    def _connect_signals(self) -> None:
+        # Welcome page
+        self._welcome.capture_requested.connect(lambda m: self.run_capture(m))
+        self._welcome.open_image_requested.connect(self._on_open)
+        self._welcome.open_folder_requested.connect(self._on_open_folder)
+        self._welcome.image_chosen.connect(self.load_image_to_editor)
+        self._welcome.shortcuts_setup_requested.connect(self._register_hotkeys)
+        # Rail / panels
+        self._rail.sticker_reclicked.connect(lambda w: pick_sticker(self._editor, w))
+        gp = self._gallery_panel
+        gp.open_requested.connect(self.load_image_to_editor)
+        gp.rename_requested.connect(self._trigger_power_rename)
+        gp.change_folder_requested.connect(self._on_open_folder)
+        gp.listing_changed.connect(self._on_listing_changed)
+        # Tool defaults / configuration changes refresh the Properties panel
+        self._editor.tool_defaults_applied.connect(self._properties.refresh_from_editor)
+        tool_config.signals.changed.connect(lambda _t: QTimer.singleShot(0, self._properties.refresh_from_editor))
+        keymap.signals.changed.connect(lambda _i: self._properties.refresh_from_editor())
+        # Editor
+        self._editor.layers_changed.connect(self._update_image_chip)
+        self._editor.modified_changed.connect(lambda _m: self._update_image_chip())
+        self._editor.zoom_changed.connect(lambda _z: self._update_image_chip())
+
+    # =====================================================================
+    #  Pages / state
+    # =====================================================================
+
+    def _set_page(self, editor_page: bool) -> None:
+        self._stack.setCurrentWidget(self._editor_page if editor_page else self._welcome)
+        self._rail.setVisible(editor_page)
+        self._side_panel.setVisible(editor_page and self.act_side.isChecked())
+        self._refresh_enabled()
+
+    def _has_image(self) -> bool:
+        return self._editor.background_pixmap() is not None
+
+    def _refresh_enabled(self) -> None:
+        has = self._has_image()
+        for a in (self.act_save, self.act_save_as, self.act_copy, self.act_close, self.act_effects,
+                  self.act_sensitive_run, self.act_undo, self.act_redo, self.act_delete, self.act_sticker,
+                  self.act_steps, self.act_zoom_in, self.act_zoom_out, self.act_fit, self.act_actual):
+            a.setEnabled(has)
+        self._zoom_slider.setEnabled(has)
+
+    def _fit_properties(self, needed: int) -> None:
+        if self._split_user_set:
+            return
+        total = sum(self._side_split.sizes()) or self._side_split.height()
+        top = max(150, min(needed, int(total * 0.6)))
+        self._side_split.setSizes([top, max(120, total - top)])
+
+    @pyqtSlot(bool)
+    def _on_side_toggled(self, on: bool) -> None:
+        self._side_panel_wanted = on
+        QSettings().setValue("ui/side_panel", "true" if on else "false")
+        self._side_panel.setVisible(on and self._stack.currentWidget() is self._editor_page)
+
+    def _restore_state(self) -> None:
+        qs = QSettings()
+        # Crabture always starts maximized, so the window geometry is neither
+        # saved nor restored (a stale un-maximized geometry from an older
+        # version is dropped).
+        qs.remove("ui/geometry")
+        for key, split in (("ui/split_main", self._main_split), ("ui/split_side", self._side_split)):
+            state = qs.value(key)
+            if state is not None:
+                try:
+                    split.restoreState(state)
+                    if split is self._side_split:
+                        self._split_user_set = True
+                except Exception:
+                    pass
+        self.setMinimumSize(900, 600)
+
+    def _save_state(self) -> None:
+        qs = QSettings()
+        qs.setValue("ui/split_main", self._main_split.saveState())
+        qs.setValue("ui/split_side", self._side_split.saveState())
+
+    def _doc_name(self) -> str:
+        path = self._editor.current_filepath()
+        return os.path.basename(path) if path else ("Untitled" if self._has_image() else "")
+
+    def _refresh_title(self) -> None:
+        name = self._doc_name()
+        mark = "*" if self._editor.is_modified() else ""
+        self.setWindowTitle(f"{mark}{name} — {self._base_title}" if name else self._base_title)
+
+    @pyqtSlot(bool)
+    def _update_title(self, modified: bool) -> None:
+        self._refresh_title()
+
+    def _update_image_chip(self) -> None:
+        pm = self._editor.background_pixmap()
+        if pm is None:
+            self._chip_image.setText("No image")
+            self._chip_image.setToolTip("")
+        else:
+            full = f"{self._doc_name()}  ·  {pm.width()}×{pm.height()}"
+            fm = self._chip_image.fontMetrics()
+            self._chip_image.setText(fm.elidedText(full, Qt.TextElideMode.ElideMiddle, 280))
+            self._chip_image.setToolTip(full)
+        self._dot.setVisible(self._editor.is_modified())
+        self._refresh_title()
+        self._refresh_enabled()
 
     @pyqtSlot(int)
     def _on_zoom_slider(self, value: int) -> None:
@@ -515,218 +644,165 @@ class CrabtureMainWindow(QMainWindow):
         self._zoom_slider.blockSignals(True)
         self._zoom_slider.setValue(pct)
         self._zoom_slider.blockSignals(False)
-        self._zoom_label.setText(f" {pct}%")
+        self._zoom_label.setText(f"{pct}%")
 
-    # =================================================================
-    #  Menu bar
-    # =================================================================
+    # =====================================================================
+    #  Theme
+    # =====================================================================
 
-    def _build_menu(self) -> None:
-        mb = self.menuBar()
+    def _set_theme(self, name: str) -> None:
+        theme.set_theme_preference(name)
+        act = self._theme_actions.get(name)
+        if act:
+            act.setChecked(True)
 
-        # -- File --
-        file_menu = mb.addMenu("&File")
-
-        act_open = QAction("&Open…", self)
-        act_open.setShortcut(QKeySequence("Ctrl+O"))
-        act_open.triggered.connect(self._on_open)
-        file_menu.addAction(act_open)
-
-        file_menu.addSeparator()
-
-        act_save = QAction("&Save (Overwrite)", self)
-        act_save.setShortcut(QKeySequence("Ctrl+S"))
-        act_save.triggered.connect(self._on_save)
-        file_menu.addAction(act_save)
-
-        act_save_as = QAction("Save &As…", self)
-        act_save_as.setShortcut(QKeySequence("Ctrl+Shift+S"))
-        act_save_as.triggered.connect(self._on_save_as)
-        file_menu.addAction(act_save_as)
-
-        file_menu.addSeparator()
-
-        act_clipboard = QAction("&Copy to Clipboard", self)
-        act_clipboard.setShortcut(QKeySequence("Ctrl+Shift+C"))
-        act_clipboard.triggered.connect(self._on_copy_clipboard)
-        file_menu.addAction(act_clipboard)
-
-        file_menu.addSeparator()
-
-        act_quit = QAction("&Quit", self)
-        act_quit.setShortcut(QKeySequence("Ctrl+Q"))
-        act_quit.triggered.connect(self.close)
-        file_menu.addAction(act_quit)
-
-        # -- Edit --
-        edit_menu = mb.addMenu("&Edit")
-
-        act_undo = QAction("&Undo", self)
-        act_undo.setShortcut(QKeySequence("Ctrl+Z"))
-        act_undo.triggered.connect(self._editor.undo)
-        edit_menu.addAction(act_undo)
-
-        act_redo = QAction("&Redo", self)
-        act_redo.setShortcut(QKeySequence("Ctrl+Y"))
-        act_redo.triggered.connect(self._editor.redo)
-        edit_menu.addAction(act_redo)
-
-        edit_menu.addSeparator()
-
-        act_rename = QAction("Power &Rename...", self)
-        act_rename.setShortcut(QKeySequence("Ctrl+R"))
-        act_rename.triggered.connect(self._on_rename_action)
-        edit_menu.addAction(act_rename)
-
-        act_del = QAction("&Delete Selected", self)
-        act_del.setShortcut(QKeySequence("Delete"))
-        act_del.triggered.connect(self._editor.delete_selected)
-        edit_menu.addAction(act_del)
-
-        # -- View --
-        view_menu = mb.addMenu("&View")
-
-        act_zin = QAction("Zoom &In", self)
-        act_zin.setShortcut(QKeySequence("Ctrl+="))
-        act_zin.triggered.connect(self._editor.zoom_in)
-        view_menu.addAction(act_zin)
-
-        act_zout = QAction("Zoom &Out", self)
-        act_zout.setShortcut(QKeySequence("Ctrl+-"))
-        act_zout.triggered.connect(self._editor.zoom_out)
-        view_menu.addAction(act_zout)
-
-        act_zreset = QAction("&Fit to Window", self)
-        act_zreset.setShortcut(QKeySequence("Ctrl+0"))
-        act_zreset.triggered.connect(self._editor.reset_zoom)
-        view_menu.addAction(act_zreset)
-
-    # =================================================================
+    # =====================================================================
     #  Gallery
-    # =================================================================
+    # =====================================================================
 
     def watch_directory(self, directory: str | None = None) -> None:
         """Start monitoring *directory* (defaults to ~/Downloads/Crabshots) for new images."""
         target = directory if directory else CRABSHOTS_DIR
         self._watched_dir = target
-        Path(target).mkdir(parents=True, exist_ok=True)
-
-        # Update the gallery dock title to reflect the active directory.
+        self._gallery_panel.watch(target)
         short = target.replace(str(Path.home()), "~")
-        self._gallery_dock.setWindowTitle(f"Gallery — {short}")
         self.statusBar().showMessage(f"Watching: {short}")
 
-        if self._watcher is not None:
-            # Remove old watches.
-            self._watcher.removePaths(self._watcher.directories())
-        else:
-            self._watcher = QFileSystemWatcher(self)
-            self._watcher.directoryChanged.connect(self._refresh_gallery)
-
-        self._watcher.addPath(target)
-        self._refresh_gallery()
-
     def _refresh_gallery(self) -> None:
-        self._gallery.clear()
-        try:
-            entries = sorted(Path(self._watched_dir).iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
-        except OSError:
-            return
-            
-        th_w = getattr(self, "_thumb_size", 120)
-        th_h = int(th_w * 0.75)
+        self._gallery_panel.refresh()
 
-        for path in entries:
-            if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
-                continue
+    def _on_listing_changed(self, paths: list) -> None:
+        short = self._watched_dir.replace(str(Path.home()), "~")
+        self._welcome.set_recent(paths, short)
+        self._update_hotkey_hint()
+
+    def _update_hotkey_hint(self) -> None:
+        show = False
+        if str(QSettings().value("ui/hotkey_hint_done", "false")).lower() != "true":
             try:
-                pix = QPixmap(str(path))
-                if pix.isNull():
-                    continue
-                thumb = pix.scaled(
-                    th_w, th_h,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-                item = QListWidgetItem(QIcon(thumb), path.name)
-                item.setData(Qt.ItemDataRole.UserRole, str(path))
-                item.setToolTip(str(path))
-                self._gallery.addItem(item)
+                from crabture.capture import hotkeys
+                show = bool(hotkeys._is_gnome())
             except Exception:
-                continue
+                show = False
+        self._welcome.set_hotkey_hint_visible(show)
 
-    @pyqtSlot(int)
-    def _on_thumb_scale(self, value: int) -> None:
-        self._thumb_size = value
-        self._gallery.setIconSize(QSize(self._thumb_size, int(self._thumb_size * 0.75)))
-        self._refresh_gallery()
+    def _on_open_folder(self) -> None:
+        directory = QFileDialog.getExistingDirectory(self, "Open Folder", self._watched_dir)
+        if directory:
+            self.watch_directory(directory)
+            self._tabs.setCurrentWidget(self._gallery_panel)
 
-    @pyqtSlot()
-    def _toggle_gallery_view(self) -> None:
-        self._is_list_view = not getattr(self, "_is_list_view", False)
-        if self._is_list_view:
-            self._gallery.setViewMode(QListWidget.ViewMode.ListMode)
-        else:
-            self._gallery.setViewMode(QListWidget.ViewMode.IconMode)
-
-    @pyqtSlot(QListWidgetItem)
-    def _on_gallery_click(self, item: QListWidgetItem) -> None:
-        filepath = item.data(Qt.ItemDataRole.UserRole)
-        if filepath:
-            self.load_image_to_editor(filepath)
-
-    def _show_gallery_context_menu(self, pos) -> None:
-        selected_items = self._gallery.selectedItems()
-        if not selected_items:
-            return
-            
-        from PyQt6.QtWidgets import QMenu
-        from PyQt6.QtGui import QAction
-        menu = QMenu(self._gallery)
-        menu.setObjectName("context_menu")
-        
-        rename_action = QAction(f"Power Rename {len(selected_items)} item(s)...", self)
-        rename_action.triggered.connect(lambda: self._trigger_power_rename(selected_items))
-        menu.addAction(rename_action)
-        
-        menu.addSeparator()
-        
-        open_action = QAction("Open in File Explorer", self)
-        open_action.triggered.connect(lambda: self._open_file_explorer(selected_items))
-        menu.addAction(open_action)
-        
-        menu.exec(self._gallery.viewport().mapToGlobal(pos))
-        
-    def _open_file_explorer(self, items):
-        if not items:
-            return
-            
-        filepath = items[0].data(Qt.ItemDataRole.UserRole)
-        import subprocess, os
-        dir_path = os.path.dirname(filepath)
-        subprocess.Popen(['xdg-open', dir_path])
-        
     def _trigger_power_rename(self, items):
-        filepaths = [item.data(Qt.ItemDataRole.UserRole) for item in items]
-        from power_rename import PowerRenameDialog
+        # Number files in gallery display order, not in selection order.
+        ordered = sorted(items, key=self._gallery.row)
+        filepaths = [item.data(Qt.ItemDataRole.UserRole) for item in ordered]
+        from crabture.rename.dialog import PowerRenameDialog
+        batch_before = self._last_rename_batch()
         dlg = PowerRenameDialog(filepaths, self)
         if dlg.exec():
             count = dlg.apply_renames()
+            for old, new in dlg.renamed.items():
+                self._editor.notify_file_renamed(old, new)
             if count > 0:
                 self.statusBar().showMessage(f"Power Rename: {count} items renamed.")
-                self._refresh_gallery()
+            if dlg.failures:
+                lines = [f"{os.path.basename(p)}: {why}" for p, why in dlg.failures[:10]]
+                if len(dlg.failures) > 10:
+                    lines.append(f"… and {len(dlg.failures) - 10} more")
+                QMessageBox.warning(
+                    self,
+                    "Power Rename",
+                    f"{count} renamed, {len(dlg.failures)} failed:\n\n" + "\n".join(lines),
+                )
+            self._refresh_gallery()
+        elif getattr(dlg, "undo_performed", False):
+            self._notify_restored(batch_before)
+            self._refresh_gallery()
+            self.statusBar().showMessage(
+                f"Undid Power Rename: {getattr(dlg, 'undone_count', 0)} file(s) restored."
+            )
 
     def _on_rename_action(self):
-        items = self._gallery.selectedItems()
+        items = self._gallery_panel.selected_items()
         if not items:
             QMessageBox.information(self, "Power Rename", "Please select items in the gallery first.")
+            self._tabs.setCurrentWidget(self._gallery_panel)
             return
         self._trigger_power_rename(items)
 
+    # -- rename undo -------------------------------------------------------
+
+    @staticmethod
+    def _last_rename_batch():
+        try:
+            from crabture.rename.history import last_rename_batch
+            return last_rename_batch()
+        except Exception:
+            return None
+
+    def _rename_undo_available(self) -> bool:
+        try:
+            from crabture.rename.dialog import has_rename_undo
+        except ImportError:
+            try:
+                from crabture.rename.history import has_rename_undo
+            except ImportError:
+                return False
+        try:
+            return bool(has_rename_undo())
+        except Exception:
+            return False
+
+    def _refresh_rename_undo(self) -> None:
+        self.act_undo_rename.setEnabled(self._rename_undo_available())
+
+    def _notify_restored(self, batch) -> None:
+        """After an undo, point the editor back at a restored open file."""
+        if not batch:
+            return
+        for item in batch.get("items", []):
+            old, new = item.get("old"), item.get("new")
+            if old and new and os.path.exists(old) and not os.path.exists(new):
+                self._editor.notify_file_renamed(new, old)
+
+    def _on_undo_last_rename(self) -> None:
+        batch = self._last_rename_batch()
+        if not batch:
+            QMessageBox.information(self, "Undo Last Rename", "There is no rename to undo.")
+            return
+        if QMessageBox.question(
+            self,
+            "Undo Last Rename",
+            f"Restore the original names of {batch.get('count', '?')} file(s) renamed on "
+            f"{batch.get('time', 'an earlier date')}?",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            from crabture.rename.history import undo_last_rename
+        except ImportError:
+            from crabture.rename.dialog import undo_last_rename
+        count, failures = undo_last_rename()
+        self._notify_restored(batch)
+        self._refresh_gallery()
+        self.statusBar().showMessage(f"Undid Power Rename: {count} file(s) restored.")
+        if failures:
+            lines = [f"{os.path.basename(p) or '—'}: {why}" for p, why in failures[:10]]
+            QMessageBox.warning(self, "Undo Last Rename",
+                                f"{count} restored, {len(failures)} could not be:\n\n" + "\n".join(lines))
+
+    # =====================================================================
+    #  Loading / closing images
+    # =====================================================================
+
     def load_image_to_editor(self, filepath: str) -> None:
         """Load *filepath* into the EditorContainer."""
+        if not self._confirm_discard_changes():
+            return
         ok = self._editor.load_image(filepath)
         if ok:
+            self._set_page(True)
+            self._update_image_chip()
+            self._properties.update_sections()
             self.statusBar().showMessage(f"Loaded: {os.path.basename(filepath)}")
         else:
             QMessageBox.warning(
@@ -735,53 +811,380 @@ class CrabtureMainWindow(QMainWindow):
                 f"Could not open image:\n{filepath}\n\nThe file may be corrupted or unsupported.",
             )
 
-    # =================================================================
+    def close_image(self) -> None:
+        """Close the current image (asks about unsaved changes) and show the welcome page."""
+        if not self._has_image():
+            return
+        if not self._confirm_discard_changes():
+            return
+        self._editor.clear_image()
+        self._set_page(False)
+        self._update_image_chip()
+        self.statusBar().showMessage("Image closed.")
+
+    # -- drag and drop -----------------------------------------------------
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802
+        if event.mimeData().hasUrls() and any(u.isLocalFile() for u in event.mimeData().urls()):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event) -> None:  # noqa: N802
+        self._handle_dropped_paths([u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()])
+        event.acceptProposedAction()
+
+    def _handle_dropped_paths(self, paths: list[str]) -> None:
+        for path in paths:
+            if os.path.isdir(path):
+                self.watch_directory(path)
+                self._tabs.setCurrentWidget(self._gallery_panel)
+                return
+        for path in paths:
+            if Path(path).suffix.lower() in SUPPORTED_EXTENSIONS:
+                self.load_image_to_editor(path)
+                return
+        if paths:
+            self.statusBar().showMessage("Dropped file is not a supported image.")
+
+    # =====================================================================
     #  Menu / button handlers
-    # =================================================================
+    # =====================================================================
 
     def _on_open(self) -> None:
         filepath, _ = QFileDialog.getOpenFileName(
-            self,
-            "Open Image",
-            os.path.expanduser("~/Downloads/Crabshots"),
-            "Images (*.png *.jpg *.jpeg *.bmp *.webp *.gif *.tiff)",
+            self, "Open Image", os.path.expanduser("~/Downloads/Crabshots"), IMAGE_FILTER
         )
         if filepath:
             self.load_image_to_editor(filepath)
 
-    def _on_save(self) -> None:
+    def _on_save(self) -> bool:
+        """Save the current image.  Returns True only if it was written."""
         if self._editor.save_overwrite():
-            self.statusBar().showMessage("Saved (overwritten).")
+            self._editor.mark_clean()
+            self.statusBar().showMessage("Saved.")
             self._refresh_gallery()
-        else:
-            self.statusBar().showMessage("Save failed.")
+            self._update_image_chip()
+            return True
+        # False covers both a failed write and a cancelled Save As dialog.
+        self.statusBar().showMessage("Not saved.")
+        return False
 
     def _on_save_as(self) -> None:
         if self._editor.save_as():
             self.statusBar().showMessage("Saved successfully.")
             self._refresh_gallery()
 
+    def _on_delete_selected(self) -> None:
+        # Never delete the item whose text is being typed into.
+        if isinstance(self._editor.scene().focusItem(), QGraphicsTextItem):
+            return
+        self._editor.delete_selected()
+
     def _on_copy_clipboard(self) -> None:
         self._editor.copy_to_clipboard()
         self.statusBar().showMessage("Copied to clipboard.")
 
-    # =================================================================
-    #  Theme toggle (V2)
-    # =================================================================
+    # =====================================================================
+    #  Screen capture
+    # =====================================================================
 
-    def _toggle_theme(self) -> None:
-        """Switch between light and dark themes at runtime."""
-        app = QApplication.instance()
-        if app is None:
+    def _get_capture_menu(self) -> QMenu:
+        """Build (once) the Capture menu shared by the menubar and the toolbar button."""
+        if self._capture_menu is not None:
+            return self._capture_menu
+        menu = QMenu("&Capture", self)
+        for mode in ("region", "fullscreen", "window", "monitor", "scroll"):
+            menu.addAction(self.capture_actions[mode])
+
+        menu.addSeparator()
+        delay_menu = menu.addMenu("&Delay")
+        icons.bind_icon(delay_menu.menuAction(), "timer", 16)
+        group = QActionGroup(self)
+        group.setExclusive(True)
+        self._delay_actions: dict[int, QAction] = {}
+        for secs in (0, 1, 2, 3, 5, 10):
+            act = QAction("None" if secs == 0 else f"{secs} s", self, checkable=True)
+            self._delay_actions[secs] = act
+            act.setChecked(abs(self._cap_delay - secs) < 1e-6)
+            act.triggered.connect(lambda _=False, v=secs: self._set_cap_delay(v))
+            group.addAction(act)
+            delay_menu.addAction(act)
+
+        act_hide = QAction("&Hide Crabture while capturing", self, checkable=True)
+        act_hide.setChecked(self._cap_hide)
+        act_hide.toggled.connect(self._set_cap_hide)
+        self._act_hide = act_hide
+        menu.addAction(act_hide)
+
+        act_clip = QAction("Copy captures to &clipboard", self, checkable=True)
+        act_clip.setChecked(self._cap_clipboard)
+        act_clip.toggled.connect(self._set_cap_clipboard)
+        self._act_clip = act_clip
+        menu.addAction(act_clip)
+
+        menu.addSeparator()
+        act_info = QAction("Capture &backend…", self)
+        icons.bind_icon(act_info, "info", 16)
+        act_info.triggered.connect(self._show_capture_backend)
+        menu.addAction(act_info)
+        act_reg = QAction("Register &GNOME shortcuts…", self)
+        icons.bind_icon(act_reg, "keyboard", 16)
+        act_reg.triggered.connect(self._register_hotkeys)
+        menu.addAction(act_reg)
+        act_unreg = QAction("&Remove GNOME shortcuts", self)
+        act_unreg.triggered.connect(self._unregister_hotkeys)
+        menu.addAction(act_unreg)
+
+        self._capture_menu = menu
+        return menu
+
+    def _reload_capture_settings(self) -> None:
+        """Re-read the capture options (changed in the Configure window) from QSettings."""
+        qs = QSettings()
+        try:
+            self._cap_delay = float(qs.value("capture/delay", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            self._cap_delay = 0.0
+        self._cap_hide = str(qs.value("capture/hide", "true")).lower() != "false"
+        self._cap_clipboard = str(qs.value("capture/clipboard", "false")).lower() == "true"
+        for secs, act in getattr(self, "_delay_actions", {}).items():
+            act.setChecked(abs(self._cap_delay - secs) < 1e-6)
+        for act, value in ((getattr(self, "_act_hide", None), self._cap_hide),
+                           (getattr(self, "_act_clip", None), self._cap_clipboard)):
+            if act is not None:
+                act.blockSignals(True)
+                act.setChecked(value)
+                act.blockSignals(False)
+
+    def _set_cap_delay(self, secs: float) -> None:
+        self._cap_delay = float(secs)
+        QSettings().setValue("capture/delay", self._cap_delay)
+
+    def _set_cap_hide(self, on: bool) -> None:
+        self._cap_hide = bool(on)
+        QSettings().setValue("capture/hide", "true" if on else "false")
+
+    def _set_cap_clipboard(self, on: bool) -> None:
+        self._cap_clipboard = bool(on)
+        QSettings().setValue("capture/clipboard", "true" if on else "false")
+
+    def _ensure_capture_service(self):
+        if self._capture is None:
+            from crabture.capture.service import CaptureService
+            self._capture = CaptureService(self)
+            self._capture.captured.connect(self._on_captured)
+            self._capture.failed.connect(self._on_capture_failed)
+            self._capture.cancelled.connect(self._on_capture_cancelled)
+        return self._capture
+
+    def run_capture(self, mode: str, delay: float | None = None, hide: bool | None = None,
+                    quit_on_cancel: bool = False) -> None:
+        """Start a screen capture.  Called from the menu and from ``--capture``.
+
+        *quit_on_cancel* is used for command-line launches: if the capture is
+        cancelled or fails, the (never shown) window closes instead of
+        leaving an empty editor behind.
+        """
+        svc = self._ensure_capture_service()
+        if svc.is_busy():
+            self.statusBar().showMessage("A capture is already in progress.")
             return
+        delay_s = self._cap_delay if delay is None else max(0.0, float(delay))
+        hide_it = self._cap_hide if hide is None else bool(hide)
+        self._quit_if_capture_ends = quit_on_cancel
+        svc.capture(mode, int(delay_s * 1000), hide_window=self if hide_it else None)
 
-        from main import apply_theme
-        if self._is_dark:
-            apply_theme(app, "light")
-            self._theme_btn.setText("🌙 Dark")
-            self._theme_btn.setToolTip("Switch to dark mode")
+    def _present(self) -> None:
+        if self.isFullScreen():
+            self.show()
         else:
-            apply_theme(app, "dark")
-            self._theme_btn.setText("☀ Light")
-            self._theme_btn.setToolTip("Switch to light mode")
-        self._is_dark = not self._is_dark
+            self.showMaximized()
+        self.raise_()
+        self.activateWindow()
+
+    def _on_captured(self, pixmap, mode: str) -> None:
+        from crabture.capture.service import save_capture
+        self._quit_if_capture_ends = False
+        path = save_capture(pixmap, CRABSHOTS_DIR)
+        if self._cap_clipboard:
+            clip = QApplication.clipboard()
+            if clip:
+                clip.setPixmap(pixmap)
+        self._present()
+        if not path:
+            QMessageBox.warning(self, "Capture", "The capture succeeded but could not be saved to disk.")
+            return
+        self.load_image_to_editor(path)
+        self._refresh_gallery()
+        self.statusBar().showMessage(f"Captured ({mode}): {os.path.basename(path)}")
+
+    def _on_capture_cancelled(self) -> None:
+        quit_now, self._quit_if_capture_ends = self._quit_if_capture_ends, False
+        self.statusBar().showMessage("Capture cancelled.")
+        if quit_now and not self.isVisible():
+            QApplication.quit()
+
+    def _on_capture_failed(self, message: str) -> None:
+        quit_now, self._quit_if_capture_ends = self._quit_if_capture_ends, False
+        QMessageBox.warning(self if self.isVisible() else None, "Capture failed", message)
+        if quit_now and not self.isVisible():
+            QApplication.quit()
+
+    def _show_capture_backend(self) -> None:
+        try:
+            from crabture.capture.service import backend_info
+            info = backend_info()
+        except Exception as e:  # pragma: no cover - defensive
+            info = f"unknown ({e})"
+        QMessageBox.information(self, "Capture backend", info)
+
+    def _register_hotkeys(self) -> None:
+        if QMessageBox.question(
+            self,
+            "Register GNOME shortcuts",
+            "Add these GNOME keyboard shortcuts?\n\n"
+            "  Ctrl+Print            fullscreen capture\n"
+            "  Ctrl+Shift+Print      region capture\n"
+            "  Ctrl+Alt+Print        window capture\n\n"
+            "Existing shortcuts are never changed; any that is already taken is skipped.",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        from crabture.capture import hotkeys
+        QMessageBox.information(self, "GNOME shortcuts", "\n".join(hotkeys.register_gnome_shortcuts()))
+        QSettings().setValue("ui/hotkey_hint_done", "true")
+        self._welcome.set_hotkey_hint_visible(False)
+
+    def _unregister_hotkeys(self) -> None:
+        from crabture.capture import hotkeys
+        QMessageBox.information(self, "GNOME shortcuts", "\n".join(hotkeys.unregister_gnome_shortcuts()))
+
+    # =====================================================================
+    #  Effects / sensitive-data scan
+    # =====================================================================
+
+    def _require_image(self, what: str) -> bool:
+        if self._editor.background_pixmap() is None:
+            QMessageBox.information(self, what, "Open or capture an image first.")
+            return False
+        return True
+
+    def _on_effects(self) -> None:
+        if not self._require_image("Image Effects"):
+            return
+        from crabture.effects.dialog import EffectsDialog
+        dlg = EffectsDialog(self._editor.render_flattened(), self)
+        if dlg.exec():
+            # Annotations are flattened into the result; Undo restores everything.
+            self._editor.replace_image(dlg.result_pixmap(), "Effects")
+            self._update_image_chip()
+            self.statusBar().showMessage("Effects applied (Ctrl+Z to undo).")
+
+    def _on_run_sensitive(self) -> None:
+        """Run the saved sensitive-data settings.  Only ever called because the
+        user triggered this action: nothing scans or redacts by itself, and
+        (unless the user turned review off in the settings) every finding is
+        reviewed in the dialog before anything is applied."""
+        if not self._require_image("Run Sensitive-Data Scan"):
+            return
+        from crabture.redact import dialog as redact_dialog
+        result = redact_dialog.run_saved_profile(self._editor.render_flattened(), self)
+        if not result or not result[0]:
+            self.statusBar().showMessage("No redaction applied.")
+            return
+        rects, style, intensity = result
+        n = self._editor.add_blur_regions(rects, style, intensity=intensity)
+        self.statusBar().showMessage(f"Redacted {n} region(s) — Ctrl+Z undoes each.")
+
+    _on_find_sensitive = _on_run_sensitive      # compatibility alias
+
+    def _on_configure_sensitive(self) -> None:
+        self._open_settings("sensitive")
+
+    # =====================================================================
+    #  Configure window
+    # =====================================================================
+
+    def _open_settings(self, tab: str | None = None) -> None:
+        """Show the (single, non-modal) Configure window, optionally on *tab*."""
+        dlg = self._settings_dlg
+        if dlg is not None and tab is not None:
+            switch = next((getattr(dlg, n) for n in ("show_tab", "set_tab", "select_tab", "set_current_tab")
+                           if hasattr(dlg, n)), None)
+            if switch is not None:
+                switch(tab)
+            else:                      # no tab switcher: recreate on the requested tab
+                dlg.close()
+                dlg.deleteLater()
+                dlg = self._settings_dlg = None
+        if dlg is None:
+            from crabture.settings.dialog import SettingsDialog, settings_signals
+            dlg = SettingsDialog(self, initial_tab=tab)
+            self._settings_dlg = dlg
+            try:
+                settings_signals.capture_changed.connect(self._reload_capture_settings)
+            except Exception:
+                pass
+            dlg.destroyed.connect(lambda *_: setattr(self, "_settings_dlg", None))
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    # =====================================================================
+    #  Dialogs
+    # =====================================================================
+
+    def _show_shortcuts(self) -> None:
+        dlg = ShortcutsDialog(self)         # built fresh: always shows the current keymap
+        dlg.customise_requested.connect(
+            lambda: (dlg.accept(), QTimer.singleShot(0, lambda: self._open_settings("shortcuts"))))
+        dlg.exec()
+
+    def _show_about(self) -> None:
+        try:
+            from crabture.version import __version__ as version
+        except Exception:
+            version = "unknown"
+        AboutDialog(str(version), getattr(self, "_backend", ""), self).exec()
+
+    # =====================================================================
+    #  Unsaved changes
+    # =====================================================================
+
+    def _confirm_discard_changes(self) -> bool:
+        """Return True if it is safe to replace/close the current image."""
+        if not self._editor.is_modified():
+            return True
+        choice = QMessageBox.question(
+            self,
+            "Unsaved Changes",
+            "The current image has unsaved annotations. Save them first?",
+            QMessageBox.StandardButton.Save
+            | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Save,
+        )
+        if choice == QMessageBox.StandardButton.Save:
+            return self._on_save()
+        return choice == QMessageBox.StandardButton.Discard
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        # Always start maximized, also when the capture service re-shows a
+        # window it hid.  Only the first show: don't fight a later un-maximize.
+        if not self._did_first_show:
+            self._did_first_show = True
+            if not self.isMaximized() and not self.isFullScreen():
+                self.setWindowState(self.windowState() | Qt.WindowState.WindowMaximized)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        # Make room for the status message on narrow windows.
+        chip = getattr(self, "_backend_chip", None)
+        if chip is not None:
+            chip.setVisible(self.width() >= 1100)
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        if self._confirm_discard_changes():
+            self._save_state()
+            event.accept()
+        else:
+            event.ignore()

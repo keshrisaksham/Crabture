@@ -1,5 +1,5 @@
 """
-models.py — ActionHistory & LayerManager for Crabture.
+editor/models.py — ActionHistory & LayerManager for Crabture.
 
 ActionHistory implements a command-pattern undo/redo stack.
 LayerManager tracks named layer groups, each holding a list of QGraphicsItem refs.
@@ -139,6 +139,47 @@ class LayerManager:
         self._recalculate_z()
         return items
 
+    def restore_layer(
+        self,
+        layer_id: str,
+        name: str,
+        index: Optional[int] = None,
+        visible: bool = True,
+    ) -> str:
+        """Re-create a previously deleted layer with its original id.
+
+        *index* is the bottom-to-top position (clamped; None = top).  If a
+        layer with *layer_id* already exists this is a no-op.
+        """
+        if self._find(layer_id) is not None:
+            return layer_id
+        layer = _Layer(layer_id=layer_id, name=name, visible=visible)
+        if index is None or index > len(self._layers):
+            index = len(self._layers)
+        self._layers.insert(max(0, index), layer)
+        self._recalculate_z()
+        return layer_id
+
+    def layer_info(self, layer_id: Optional[str]) -> Optional[tuple]:
+        """Return (name, index, visible) for *layer_id*, or None if unknown."""
+        if layer_id is None:
+            return None
+        layer = self._find(layer_id)
+        if layer is None:
+            return None
+        return (layer.name, self._index(layer_id), layer.visible)
+
+    def layer_id_of(self, item) -> Optional[str]:
+        """Return the id of the layer that contains *item*, if any."""
+        for layer in self._layers:
+            if item in layer.items:
+                return layer.layer_id
+        return None
+
+    def is_layer_empty(self, layer_id: str) -> bool:
+        layer = self._find(layer_id)
+        return layer is not None and not layer.items
+
     def rename_layer(self, layer_id: str, new_name: str) -> None:
         layer = self._find(layer_id)
         if layer:
@@ -181,7 +222,8 @@ class LayerManager:
         layer = self._find(layer_id)
         if layer is None:
             return
-        layer.items.append(item)
+        if item not in layer.items:
+            layer.items.append(item)
         idx = self._index(layer_id)
         item.setZValue(self.BASE_Z + idx * self.Z_STEP)
         item.setVisible(layer.visible)
