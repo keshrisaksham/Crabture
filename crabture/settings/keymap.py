@@ -5,7 +5,8 @@ Single source of truth for every shortcut:
 
 * ``kind == 'tool'``   – a single key with no modifiers that switches the
   active drawing tool while the canvas has focus (``S`` = Select, ``R`` =
-  Rectangle, …).  ``''`` means unassigned.
+  Rectangle, …).  ``''`` means unassigned.  The Hand tool's default is Space,
+  which pans only while held (see ``EditorContainer``).
 * ``kind == 'action'`` – a menu/toolbar action shortcut, any valid
   ``QKeySequence`` text (``Ctrl+Shift+S``, a chord such as ``Ctrl+K, Ctrl+C``
   …).  It must contain Ctrl/Alt/Meta or be a function key.  ``''`` means
@@ -52,6 +53,7 @@ def _act(name: str, label: str, group: str, seq: str = "", kind: str = "action")
 DEFS: List[ShortcutDef] = [
     # -- tools (single key, canvas focused) --------------------------------
     _tool("select", "Select", "S"),
+    _tool("hand", "Hand (hold Space to pan)", "Space"),
     _tool("arrow", "Arrow", "A"),
     _tool("line", "Line", "L"),
     _tool("pen", "Freehand Pen", "D"),
@@ -243,8 +245,10 @@ def validate(id: str, text: str) -> Optional[str]:
         if _combo_mods(c) != Qt.KeyboardModifier.NoModifier:
             return "A tool shortcut must be a single key without Ctrl, Alt, Shift or Meta."
         key = _combo_key(c)
+        if id == "tool.hand" and key == int(Qt.Key.Key_Space.value):
+            return None                               # the one tool that may use Space (hold to pan)
         if key in _BLOCKED_BARE_KEYS:
-            return "That key is reserved (Esc, Enter, Delete, Backspace, Tab and Space can't be tool shortcuts)."
+            return "That key is reserved (Esc, Enter, Delete, Backspace, Tab and Space can't be tool shortcuts, except Space for the Hand tool)."
         if key not in _ALLOWED_TOOL_KEYS:
             return "Use a letter, digit, F1–F12 or one of [ ] , . / ; ' - = \\ ` as a tool shortcut."
         return None

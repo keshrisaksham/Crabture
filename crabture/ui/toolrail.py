@@ -26,7 +26,7 @@ from crabture.ui.common import divider
 
 # (tool id, icon name, label, shortcut key or "")
 TOOL_GROUPS = [
-    [("select", "select", "Select", "S")],
+    [("select", "select", "Select", "S"), ("hand", "hand", "Hand", "Space")],
     [("arrow", "arrow", "Arrow", "A"), ("line", "line", "Line", "L"), ("pen", "pen", "Freehand pen", "D")],
     [("rectangle", "rectangle", "Rectangle", "R"), ("ellipse", "ellipse", "Ellipse", "E"),
      ("highlight", "highlight", "Highlight", "H")],

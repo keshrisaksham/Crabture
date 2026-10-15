@@ -65,6 +65,7 @@ TOOL_LABELS: Dict[str, str] = {
     "spotlight": "Spotlight",
     "sticker": "Sticker",
     "eyedropper": "Eyedropper",
+    "hand": "Hand",
 }
 
 _COLOR_HELP = "Leave on 'Palette colour' to use whatever colour is selected in the side panel."
@@ -94,6 +95,7 @@ TOOL_OPTIONS: Dict[str, List[OptionDef]] = {
     "select": [],
     "crop": [],
     "eyedropper": [],
+    "hand": [],
     "arrow": [
         _color(),
         _alpha(),

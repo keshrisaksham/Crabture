@@ -52,7 +52,7 @@ TOOL_LABELS = {
     "pixelate": "Pixelate", "blur": "Blur", "text": "Text", "crop": "Crop",
     "magnifier": "Magnifier", "balloon": "Speech balloon", "ellipse": "Ellipse", "line": "Line",
     "pen": "Freehand pen", "step": "Numbered step", "spotlight": "Spotlight",
-    "sticker": "Sticker", "eyedropper": "Eyedropper",
+    "sticker": "Sticker", "eyedropper": "Eyedropper", "hand": "Hand",
 }
 
 
@@ -338,7 +338,7 @@ class PropertiesPanel(QWidget):
         has_spot_item = any(isinstance(i, SpotlightItem) for i in selected)
 
         self._tool_badge.setText(TOOL_LABELS.get(tool, tool.title()))
-        no_colour_tools = {"blur", "pixelate", "crop", "magnifier", "eyedropper"}
+        no_colour_tools = {"blur", "pixelate", "crop", "magnifier", "eyedropper", "hand"}
         show_colour = tool not in no_colour_tools or (bool(selected) and not has_intensity_item)
         self.color_card.setVisible(show_colour)
         self.intensity_card.setVisible(tool in ("blur", "pixelate") or has_intensity_item)

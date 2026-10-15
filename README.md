@@ -20,7 +20,7 @@ It captures your screen (X11 *and* Wayland, because apparently we can't have nic
 ### 🖍 Annotation tools
 *Seventeen of them. You'll use three.*
 
-`Select`, `Arrow`, `Rectangle`, `Highlight`, `Pixelate`, `Blur`, `Text`, `Crop`, `Magnifier`, `Speech Balloon`, `Ellipse`, `Line`, freehand `Pen`, numbered `Step` markers, `Spotlight` (dims everything except the bit you want people to look at, i.e. the thing they'd have missed anyway), emoji `Sticker` (click the tool twice to pick one — yes, this is a professional tool) and an `Eyedropper`.
+`Select`, `Arrow`, `Rectangle`, `Highlight`, `Pixelate`, `Blur`, `Text`, `Crop`, `Magnifier`, `Speech Balloon`, `Ellipse`, `Line`, freehand `Pen`, numbered `Step` markers, `Spotlight` (dims everything except the bit you want people to look at, i.e. the thing they'd have missed anyway), emoji `Sticker` (click the tool twice to pick one — yes, this is a professional tool), an `Eyedropper` and a `Hand` for panning.
 
 - **The Eyedropper, now with a loupe.** Previously it was a crosshair and a prayer. Now you get an actual eyedropper cursor and a magnifying loupe that follows it: a pixel-exact zoom of whatever's under the pointer, a marker on the exact pixel you're about to pick, and a HEX/RGB readout *before* you click. Click to pick, or press and slide to fine-tune. `Esc` takes you back to the tool you were using. Revolutionary, we know. Colour pickers have only existed since the 80s.
 - **Pixelate and Blur are live effects.** They re-render whatever's underneath them, with strength set by the **intensity slider** in the Properties panel (it also applies to a selected Pixelate/Blur item).
@@ -177,9 +177,11 @@ Or run straight from the source tree with `python3 main.py`, like a purist.
 | `L` | Line | `D` | Freehand pen |
 | `N` | Numbered step | `O` | Spotlight |
 | `Y` | Sticker | `I` | Eyedropper |
-| `K` | Speech balloon | | |
+| `K` | Speech balloon | `Space` | Hand (hold to pan) |
 
-While cropping, `Enter` confirms and `Esc` cancels. While using the eyedropper, `Esc` takes you back to your previous tool, and `Enter`/`Space` picks the colour under the pointer.
+Hold `Space` to pan around a zoomed-in image with the mouse, whatever tool is active. Let go and you're back where you were. You can also pick the Hand tool from the tool rail to stay in pan mode.
+
+While cropping, `Enter` confirms and `Esc` cancels. While using the eyedropper, `Esc` takes you back to your previous tool, and `Enter` picks the colour under the pointer.
 
 ## 🗺 Project layout
 *A tour, for the three people who'll ever read this.*

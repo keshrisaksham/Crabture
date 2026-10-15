@@ -20,7 +20,7 @@ import os
 from contextlib import contextmanager
 from typing import List, Optional
 
-from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QBrush,
     QColor,
@@ -73,7 +73,7 @@ from crabture.settings import tool_config
 TOOLS = (
     "select", "arrow", "rectangle", "highlight",
     "pixelate", "blur", "text", "crop", "magnifier", "balloon",
-    "ellipse", "line", "pen", "step", "spotlight", "sticker", "eyedropper",
+    "ellipse", "line", "pen", "step", "spotlight", "sticker", "eyedropper", "hand",
 )
 
 
@@ -171,6 +171,11 @@ class EditorContainer(QGraphicsView):
         self._eyedrop_down: bool = False
         self._tool_before_eyedropper: str = "select"
         self._active_tool: str = "select"
+        # Hand tool: Space held = temporary pan over whatever tool is active (like Photoshop).
+        # _pan_last is the last mouse position while a pan drag is running.
+        self._hand_held: bool = False
+        self._hand_release_pending: bool = False
+        self._pan_last: Optional[QPoint] = None
         self._active_color: QColor = QColor("#FF4444")
         self._active_alpha: int = 255
         self._active_intensity: int = 10
@@ -480,22 +485,69 @@ class EditorContainer(QGraphicsView):
         if tool_name == "eyedropper" and self._active_tool != "eyedropper":
             self._tool_before_eyedropper = self._active_tool if self._active_tool in TOOLS else "select"
         self._active_tool = tool_name
-        if tool_name == "select":
+        self._apply_tool_cursor()
+        self._set_eyedropper_active(tool_name == "eyedropper")
+        self._apply_tool_defaults(tool_name)
+        self.tool_changed.emit(tool_name)
+
+    def _apply_tool_cursor(self) -> None:
+        """Drag mode + cursor for the active tool (the hand overrides while Space is held)."""
+        tool = "hand" if self._hand_held else self._active_tool
+        if tool == "select":
             self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
             self.setCursor(Qt.CursorShape.ArrowCursor)
-        elif tool_name == "eyedropper":
+        elif tool == "hand":
+            self.setDragMode(QGraphicsView.DragMode.NoDrag)
+            self.setCursor(Qt.CursorShape.ClosedHandCursor if self._pan_last is not None
+                           else Qt.CursorShape.OpenHandCursor)
+        elif tool == "eyedropper":
             from crabture.editor.eyedropper_loupe import make_eyedropper_cursor
             self.setDragMode(QGraphicsView.DragMode.NoDrag)
             self.setCursor(make_eyedropper_cursor())
         else:
             self.setDragMode(QGraphicsView.DragMode.NoDrag)
             self.setCursor(Qt.CursorShape.CrossCursor)
-        self._set_eyedropper_active(tool_name == "eyedropper")
-        self._apply_tool_defaults(tool_name)
-        self.tool_changed.emit(tool_name)
 
     def active_tool(self) -> str:
         return self._active_tool
+
+    # -- Hand tool (pan a zoomed-in image) ------------------------------------
+
+    def _hand_active(self) -> bool:
+        return self._hand_held or self._active_tool == "hand"
+
+    def _begin_hand_hold(self) -> None:
+        """Space pressed: pan with the mouse until it is released, whatever the tool."""
+        if self._hand_held or self._drawing:
+            return
+        if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
+            return                                    # mid-drag with another tool: leave it alone
+        self._hand_held = True
+        self._hand_release_pending = False
+        if self._loupe is not None:
+            self._loupe.hide()
+        self._apply_tool_cursor()
+
+    def _end_hand_hold(self, force: bool = False) -> None:
+        if not self._hand_held:
+            return
+        if self._pan_last is not None and not force:
+            self._hand_release_pending = True         # finish the drag in progress first
+            return
+        self._hand_held = False
+        self._hand_release_pending = False
+        self._pan_last = None
+        self._apply_tool_cursor()
+
+    def _pan_by(self, delta: QPoint) -> None:
+        hbar, vbar = self.horizontalScrollBar(), self.verticalScrollBar()
+        hbar.setValue(hbar.value() - delta.x())
+        vbar.setValue(vbar.value() - delta.y())
+
+    def focusOutEvent(self, event) -> None:  # noqa: N802
+        # A key release can be lost when the window loses focus; don't stay stuck on the hand.
+        self._end_hand_hold(force=True)
+        super().focusOutEvent(event)
 
     # -- Per-tool saved defaults (tool_config) ------------------------------
 
@@ -634,6 +686,11 @@ class EditorContainer(QGraphicsView):
     # =====================================================================
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
+        if self._hand_active() and event.button() == Qt.MouseButton.LeftButton:
+            self._pan_last = event.position().toPoint()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
         # If a crop is pending, check if user clicked a crop button.
         if self._crop_active:
             if event.button() == Qt.MouseButton.LeftButton:
@@ -760,6 +817,15 @@ class EditorContainer(QGraphicsView):
             self._drawing = False
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._pan_last is not None:
+            pos = event.position().toPoint()
+            self._pan_by(pos - self._pan_last)
+            self._pan_last = pos
+            event.accept()
+            return
+        if self._hand_active():
+            event.accept()
+            return
         if self._active_tool == "eyedropper":
             self._eyedropper_move(event.position().toPoint())
         if not self._drawing or self._draw_start is None:
@@ -805,6 +871,14 @@ class EditorContainer(QGraphicsView):
             self._temp_item.setRect(r)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if self._pan_last is not None and event.button() == Qt.MouseButton.LeftButton:
+            self._pan_last = None
+            if self._hand_release_pending:
+                self._end_hand_hold()
+            else:
+                self._apply_tool_cursor()
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             self._eyedrop_down = False
         if event.button() != Qt.MouseButton.LeftButton or not self._drawing:
@@ -869,7 +943,7 @@ class EditorContainer(QGraphicsView):
                 self.set_tool(back if back in TOOLS and back != "eyedropper" else "select")
                 event.accept()
                 return
-            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
                 from PyQt6.QtGui import QCursor
                 local = self.viewport().mapFromGlobal(QCursor.pos())
                 if self.viewport().rect().contains(local):
@@ -883,12 +957,25 @@ class EditorContainer(QGraphicsView):
             # Key -> tool comes from settings/keymap.py (user-configurable); it returns
             # None for any key with a modifier held.
             tool = keymap.tool_for_key(event, event.modifiers())
+            if tool == "hand" and event.key() == Qt.Key.Key_Space:
+                # Space is a hold-to-pan key, not a tool switch (auto-repeat is ignored).
+                if not event.isAutoRepeat():
+                    self._begin_hand_hold()
+                event.accept()
+                return
             if tool is not None:
                 self.set_tool(tool)
                 event.accept()
                 return
 
         super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+        if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat() and self._hand_held:
+            self._end_hand_hold()
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
 
     def _is_text_editing(self) -> bool:
         """Return True if any QGraphicsTextItem currently has editor focus."""
