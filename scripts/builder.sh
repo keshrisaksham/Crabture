@@ -47,7 +47,7 @@ Type=Application
 Name=Crabture
 GenericName=Image Editor
 Comment=Annotate and edit images with Crabture
-Exec="$BIN_DIR/crabture" %f
+Exec="$BIN_DIR/crabture" %F
 Icon=$PROJECT_DIR/assets/logo.png
 Categories=Graphics;2DGraphics;Photography;Utility;
 Keywords=screenshot;capture;annotate;image;editor;sharex;
@@ -68,48 +68,11 @@ Name=Capture Active Window
 Exec="$BIN_DIR/crabture" --capture window
 DESKTOP
 
-    # 3. Create Nautilus script for "Open Directory with Crabture"
-    echo "    Installing Nautilus script"
-    cat > "$NAUTILUS_SCRIPTS/Open Directory with Crabture" << 'SCRIPT'
-#!/usr/bin/env bash
-SELECTED=$(echo "$NAUTILUS_SCRIPT_SELECTED_FILE_PATHS" | head -n 1 | tr -d '\r')
-if [ -z "$SELECTED" ]; then
-    SELECTED="$NAUTILUS_SCRIPT_CURRENT_URI"
-    SELECTED="${SELECTED#file://}"
-    SELECTED=$(python3 -c "import urllib.parse, sys; print(urllib.parse.unquote(sys.argv[1]))" "$SELECTED")
-fi
-if [ -d "$SELECTED" ]; then
-    TARGET="$SELECTED"
-elif [ -f "$SELECTED" ]; then
-    TARGET="$(dirname "$SELECTED")"
-else
-    TARGET="$HOME"
-fi
-exec "$HOME/.local/bin/crabture" --directory "$TARGET"
-SCRIPT
-    chmod +x "$NAUTILUS_SCRIPTS/Open Directory with Crabture"
-
-    # 4. Create Nautilus script for "Edit with Crabture" (a specific image file)
-    echo "    Installing Nautilus script: Edit with Crabture"
-    cat > "$NAUTILUS_SCRIPTS/Edit with Crabture" << 'SCRIPT'
-#!/usr/bin/env bash
-# Opens the first selected image in the Crabture editor (its folder fills the gallery).
-FILE=""
-while IFS= read -r candidate; do
-    candidate="${candidate%$'\r'}"
-    [ -f "$candidate" ] || continue
-    case "${candidate,,}" in
-        *.png|*.jpg|*.jpeg|*.bmp|*.webp|*.gif|*.tif|*.tiff) FILE="$candidate"; break ;;
-    esac
-done <<< "$NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"
-if [ -z "$FILE" ]; then
-    msg="Select an image file (png, jpg, bmp, webp, gif, tiff) to edit with Crabture."
-    if command -v notify-send >/dev/null 2>&1; then notify-send "Crabture" "$msg"; else echo "$msg" >&2; fi
-    exit 1
-fi
-exec "$HOME/.local/bin/crabture" --directory "$(dirname "$FILE")" "$FILE"
-SCRIPT
-    chmod +x "$NAUTILUS_SCRIPTS/Edit with Crabture"
+    # 3. Nautilus scripts (right-click ▸ Scripts): the same files the .deb ships, from packaging/nautilus
+    echo "    Installing Nautilus scripts"
+    for script in "$PROJECT_DIR"/packaging/nautilus/*; do
+        install -m 0755 "$script" "$NAUTILUS_SCRIPTS/$(basename "$script")"
+    done
 
     echo "    Updating desktop database..."
     if command -v update-desktop-database &> /dev/null; then

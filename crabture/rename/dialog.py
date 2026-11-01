@@ -1,7 +1,8 @@
 """
 rename/dialog.py — Power Rename: bulk file renaming with a live preview.
 
-Each file goes through this pipeline (every step optional, in this order):
+Each file goes through this pipeline (every step optional, in this order; the dialog shows
+steps 2 and 3 together in one card, "New name", with the numbering options inside it):
 
   1. Find & Replace   plain text or regex (\\1 / \\g<name> groups), whole word,
                       first/all matches, on name+extension, name only or ext only
@@ -84,6 +85,12 @@ SORT_KEYS = ("given", "name", "mtime", "size", "dimensions")
 KNOWN_TOKENS = ("name", "ext", "n", "date", "mtime", "ctime", "parent", "w", "h", "size", "rand", "original")
 _ILLEGAL = '\\/:*?"<>|'
 _RAND_ALPHABET = string.ascii_lowercase + string.digits
+_HAS_NUMBER_TOKEN = re.compile(r"(?<!\{)\{n(:[^{}]*)?\}")      # {n} or {n:03}, but not {name}
+
+
+def template_uses_number(template: str) -> bool:
+    """True if *template* contains the ``{n}`` counter token (``{name}`` does not count)."""
+    return bool(_HAS_NUMBER_TOKEN.search(template or ""))
 
 
 # ===========================================================================
@@ -105,7 +112,7 @@ class RenameOptions:
     template_mode: str = "off"       # off | sequential | template
     seq_base: str = ""
     seq_sep: str = "_"
-    template: str = "{name}_{n}"
+    template: str = "_{n}"
     counter_start: int = 1
     counter_step: int = 1
     counter_padding: int = 1
@@ -130,6 +137,13 @@ class RenameOptions:
     clean_spaces: str = "none"       # none | _ | -
     clean_collapse: bool = False
     clean_strip_edges: bool = False
+
+
+def default_options() -> RenameOptions:
+    """What the dialog starts with (and Reset returns to): build the name from a pattern.
+
+    The engine's own ``RenameOptions()`` stays "do nothing"; this is only the dialog's starting point."""
+    return RenameOptions(template_mode="template")
 
 
 def options_to_dict(o: RenameOptions) -> dict:
@@ -776,9 +790,9 @@ class _CardHeader(QWidget):
 
 
 class _Card(QFrame):
-    """A collapsible pipeline step: number badge, title, ON badge, body."""
+    """A collapsible group of options: title, ON badge, body."""
 
-    def __init__(self, step: int, title: str, expanded: bool = True, parent=None) -> None:
+    def __init__(self, title: str, expanded: bool = True, parent=None) -> None:
         super().__init__(parent)
         _role(self, "card")
         outer = QVBoxLayout(self)
@@ -790,10 +804,6 @@ class _Card(QFrame):
         head = QHBoxLayout(header)
         head.setContentsMargins(0, 0, 0, 0)
         head.setSpacing(8)
-        self._num = _role(QLabel(str(step)), "badge")
-        self._num.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._num.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        head.addWidget(self._num)
         self._title = QLabel(title)
         font = self._title.font()
         font.setBold(True)
@@ -826,6 +836,22 @@ class _Card(QFrame):
 
     def set_active(self, active: bool) -> None:
         self._on.setVisible(active)
+
+
+def _more_options(body: QWidget, label: str = "More options") -> QPushButton:
+    """A flat link-style button that shows/hides *body* (hidden to start with)."""
+    btn = _role(QPushButton(), "ghost")
+    btn.setAutoDefault(False)
+    btn.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def sync(on: bool) -> None:
+        btn.setText(f"{'▾' if on else '▸'} {label}")
+        body.setVisible(on)
+
+    btn.setCheckable(True)
+    btn.toggled.connect(sync)
+    sync(False)
+    return btn
 
 
 def _error_label() -> QLabel:
@@ -882,6 +908,10 @@ class PowerRenameDialog(QDialog):
         self._timer.timeout.connect(self._preview)
 
         self._build_ui()
+        for btn in self.findChildren(QPushButton):
+            # Enter in a text field must never "click" a button (it used to open Save preset…).
+            btn.setAutoDefault(False)
+            btn.setDefault(False)
         self._reload_presets()
         QShortcut(QKeySequence("Ctrl+Return"), self, activated=self._apply_shortcut)
         QShortcut(QKeySequence("Ctrl+Enter"), self, activated=self._apply_shortcut)
@@ -889,7 +919,21 @@ class PowerRenameDialog(QDialog):
         geometry = _settings().value("powerrename/geometry")
         if geometry:
             self.restoreGeometry(geometry)
-        self._preview()
+        self._set_options(default_options())
+        self._first_show = True
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        if getattr(self, "_first_show", False):
+            self._first_show = False
+            # Ready to type the name in front of the "_{n}" that is already there.
+            QTimer.singleShot(0, self._cursor_before_pattern)
+
+    def _cursor_before_pattern(self) -> None:
+        # Focusing a line edit can select its text; a typed letter would then replace "_{n}".
+        self.template_edit.setFocus(Qt.FocusReason.OtherFocusReason)
+        self.template_edit.deselect()
+        self.template_edit.setCursorPosition(0)
 
     # ------------------------------------------------------------------
     #  Widget helpers
@@ -961,11 +1005,12 @@ class PowerRenameDialog(QDialog):
         self.btn_save_preset = _role(QPushButton("Save preset…"), "ghost")
         self.btn_save_preset.clicked.connect(self._save_preset)
         hl.addWidget(self.btn_save_preset)
-        self.btn_delete_preset = _role(QPushButton("Delete"), "ghost")
+        self.btn_delete_preset = _role(QPushButton("Delete preset"), "ghost")
+        self.btn_delete_preset.hide()
         self.btn_delete_preset.clicked.connect(self._delete_preset)
         hl.addWidget(self.btn_delete_preset)
         self.btn_reset = _role(QPushButton("Reset"), "ghost")
-        self.btn_reset.clicked.connect(lambda: self._set_options(RenameOptions()))
+        self.btn_reset.clicked.connect(self._reset)
         hl.addWidget(self.btn_reset)
         root.addWidget(header)
 
@@ -1024,135 +1069,178 @@ class PowerRenameDialog(QDialog):
         col.setContentsMargins(0, 0, 8, 0)
         col.setSpacing(10)
 
-        pipeline = _role(QLabel(
-            "Pipeline: 1 Find & Replace → 2 Template → 3 Insert / Remove → 4 Case → 5 Cleanup"
-        ), "muted")
-        pipeline.setWordWrap(True)
-        col.addWidget(pipeline)
-
-        # 1. Find & Replace
-        self.card_find = _Card(1, "Find & Replace", expanded=True)
-        self.search_edit = self._line("Search for")
-        self.replace_edit = self._line("Replace with  (regex: \\1, \\g<name>)")
+        # 1. Find & replace
+        self.card_find = _Card("Find & replace", expanded=False)
+        self.search_edit = self._line("Text to look for")
+        self.replace_edit = self._line("Replace it with")
         self.find_error = _error_label()
-        self.regex_cb = self._check("Regular expression")
-        self.case_cb = self._check("Match case")
-        self.word_cb = self._check("Whole word")
-        self.all_cb = self._check("Replace all matches", True)
-        self.apply_to_combo = self._combo(["Filename + extension", "Filename only", "Extension only"])
+        self.regex_cb = self._check("Regular expression  (replace can use \\1, \\g<name>)")
+        self.case_cb = self._check("Match upper/lower case")
+        self.word_cb = self._check("Whole words only")
+        self.all_cb = self._check("Replace every match", True)
+        self.apply_to_combo = self._combo(["Name and extension", "Name only", "Extension only"])
         self.card_find.body_layout.addLayout(self._grid([("Find", self.search_edit), ("Replace", self.replace_edit)]))
         self.card_find.body_layout.addWidget(self.find_error)
-        flags = QGridLayout()
-        flags.addWidget(self.regex_cb, 0, 0)
-        flags.addWidget(self.case_cb, 0, 1)
-        flags.addWidget(self.word_cb, 1, 0)
-        flags.addWidget(self.all_cb, 1, 1)
-        self.card_find.body_layout.addLayout(flags)
-        self.card_find.body_layout.addLayout(self._grid([("Apply to", self.apply_to_combo)]))
+        find_more = QWidget()
+        fm = QVBoxLayout(find_more)
+        fm.setContentsMargins(0, 0, 0, 0)
+        fm.setSpacing(6)
+        for w in (self.regex_cb, self.case_cb, self.word_cb, self.all_cb):
+            fm.addWidget(w)
+        fm.addLayout(self._grid([("Look in", self.apply_to_combo)]))
+        self.card_find.body_layout.addWidget(_more_options(find_more), 0, Qt.AlignmentFlag.AlignLeft)
+        self.card_find.body_layout.addWidget(find_more)
         col.addWidget(self.card_find)
 
-        # 2. Template / numbering
-        self.card_tpl = _Card(2, "Template & numbering", expanded=True)
-        self.mode_combo = self._combo(["Off", "Sequential (base + number)", "Template"])
+        # 2. New name  (where the name comes from, and how files are numbered)
+        self.card_tpl = _Card("New name", expanded=True)
+        self.mode_combo = self._combo(["Keep the current name",
+                                       "Type a name (photo_1, photo_2…)",
+                                       "Build from a pattern"])
         self.mode_combo.currentIndexChanged.connect(self._update_template_visibility)
-        self.card_tpl.body_layout.addLayout(self._grid([("Mode", self.mode_combo)]))
+        self.mode_combo.activated.connect(self._focus_pattern)
+        self.card_tpl.body_layout.addLayout(self._grid([("Name from", self.mode_combo)]))
 
         self.seq_widget = QWidget()
         sl = QVBoxLayout(self.seq_widget)
         sl.setContentsMargins(0, 0, 0, 0)
         self.base_name_edit = self._line("e.g. vacation_photo")
-        self.separator_combo = self._combo(["_ (Underscore)", "- (Dash)", "  (Space)", "None"])
-        sl.addLayout(self._grid([("Base name", self.base_name_edit), ("Separator", self.separator_combo)]))
+        self.base_name_edit.returnPressed.connect(self._apply_shortcut)
+        self.separator_combo = self._combo(["_  underscore", "-  dash", "    space", "nothing"])
+        sl.addLayout(self._grid([("Name", self.base_name_edit), ("Then", self.separator_combo)]))
+        seq_help = _role(QLabel("A number is added after the name. The extension is kept."), "muted")
+        seq_help.setWordWrap(True)
+        sl.addWidget(seq_help)
         self.card_tpl.body_layout.addWidget(self.seq_widget)
 
         self.tpl_widget = QWidget()
         tl = QVBoxLayout(self.tpl_widget)
         tl.setContentsMargins(0, 0, 0, 0)
-        self.template_edit = self._line("{name}_{n}", "{name}_{n}")
-        tl.addLayout(self._grid([("Template", self.template_edit)]))
+        self.template_edit = self._line("_{n}", "_{n}")
+        self.template_edit.textChanged.connect(lambda *_: self._update_template_visibility())
+        self.template_edit.returnPressed.connect(self._apply_shortcut)      # Enter = save the name
+        tl.addLayout(self._grid([("Pattern", self.template_edit)]))
+        tl.addWidget(_role(QLabel("Click to add to the pattern:"), "muted"))
         chips = QGridLayout()
         chips.setSpacing(4)
-        for k, tok in enumerate(["{name}", "{n}", "{date}", "{mtime:%Y-%m-%d}", "{ctime}", "{parent}",
-                                 "{w}", "{h}", "{size}", "{rand:6}", "{original}", "{ext}"]):
-            b = _role(QPushButton(tok), "ghost")
+
+        def chip(label: str, tok: str) -> QPushButton:
+            b = _role(QPushButton(label), "ghost")
             b.setAutoDefault(False)
-            b.setToolTip(f"Insert {tok}")
+            b.setToolTip(f"Adds {tok}")
             b.clicked.connect(lambda _=False, t=tok: self.template_edit.insert(t))
-            chips.addWidget(b, k // 3, k % 3)
+            return b
+
+        # (button label, token inserted): the common ones first, the rest under "More".
+        common = [("Current name", "{name}"), ("Number", "{n}"), ("Modified date", "{mtime:%Y-%m-%d}")]
+        extra = [("Today's date", "{date}"), ("Created date", "{ctime}"), ("Folder name", "{parent}"),
+                 ("Width", "{w}"), ("Height", "{h}"), ("File size", "{size}"),
+                 ("Random text", "{rand:6}"), ("Full old name", "{original}"), ("Extension", "{ext}")]
+        for k, (label, tok) in enumerate(common):
+            chips.addWidget(chip(label, tok), 0, k)
         tl.addLayout(chips)
+        chips_more = QWidget()
+        cm = QGridLayout(chips_more)
+        cm.setContentsMargins(0, 0, 0, 0)
+        cm.setSpacing(4)
+        for k, (label, tok) in enumerate(extra):
+            cm.addWidget(chip(label, tok), k // 3, k % 3)
+        self.regen_btn = _role(QPushButton("New random text"), "ghost")
+        self.regen_btn.setToolTip("Pick different random text for {rand}")
+        self.regen_btn.setAutoDefault(False)
+        self.regen_btn.clicked.connect(self._regenerate)
+        cm.addWidget(self.regen_btn, (len(extra) + 2) // 3, 0, 1, 3, Qt.AlignmentFlag.AlignLeft)
+        tl.addWidget(_more_options(chips_more, "More choices"), 0, Qt.AlignmentFlag.AlignLeft)
+        tl.addWidget(chips_more)
         self.template_error = _error_label()
         tl.addWidget(self.template_error)
-        tpl_help = _role(QLabel(
-            "{n:03} pads to 3 digits · {date}/{mtime:fmt} use strftime · {rand:N} is stable until "
-            "Regenerate · {{ and }} are literal braces · the extension is kept"
-        ), "muted")
-        tpl_help.setWordWrap(True)
-        tl.addWidget(tpl_help)
+        self.template_hint = _role(QLabel(""), "muted")
+        self.template_hint.setWordWrap(True)
+        self.template_hint.hide()
+        tl.addWidget(self.template_hint)
         self.card_tpl.body_layout.addWidget(self.tpl_widget)
 
+        # Numbering: only shown while the new name actually contains a number.
         self.counter_widget = QWidget()
         cl = QVBoxLayout(self.counter_widget)
         cl.setContentsMargins(0, 0, 0, 0)
+        cl.setSpacing(6)
         self.start_num_spin = self._spin(0, 999999, 1)
         self.step_spin = self._spin(1, 9999, 1)
         self.padding_spin = self._spin(1, 10, 1)
-        counters = QHBoxLayout()
-        for label, spin in (("Start", self.start_num_spin), ("Step", self.step_spin), ("Padding", self.padding_spin)):
-            counters.addWidget(QLabel(label))
-            counters.addWidget(spin)
-        counters.addStretch(1)
-        cl.addLayout(counters)
-        self.sort_combo = self._combo(["As given", "Name (natural)", "Modified date", "Size", "Dimensions"])
-        self.sort_desc_cb = self._check("Descending")
+        self.start_num_spin.setToolTip("The first file gets this number")
+        self.step_spin.setToolTip("Add this much for each next file (2 gives 1, 3, 5…)")
+        self.padding_spin.setToolTip("Digits to show: 3 gives 001, 002…")
+        num_row = QHBoxLayout()
+        num_row.addWidget(QLabel("Number from"))
+        num_row.addWidget(self.start_num_spin)
+        num_row.addSpacing(8)
+        num_row.addWidget(QLabel("Digits"))
+        num_row.addWidget(self.padding_spin)
+        num_row.addStretch(1)
+        cl.addLayout(num_row)
+        num_more = QWidget()
+        nm = QVBoxLayout(num_more)
+        nm.setContentsMargins(0, 0, 0, 0)
+        nm.setSpacing(6)
+        nm.addLayout(self._grid([("Count by", self.step_spin)]))
+        self.sort_combo = self._combo(["The order listed", "Name (2 before 10)", "Date modified", "File size",
+                                       "Image dimensions"])
+        self.sort_desc_cb = self._check("Reverse")
         sort_row = QHBoxLayout()
-        sort_row.addWidget(QLabel("Number files by"))
+        sort_row.addWidget(QLabel("Number in order of"))
         sort_row.addWidget(self.sort_combo, 1)
         sort_row.addWidget(self.sort_desc_cb)
-        cl.addLayout(sort_row)
-        self.regen_btn = _role(QPushButton("Regenerate {rand}"), "ghost")
-        self.regen_btn.setAutoDefault(False)
-        self.regen_btn.clicked.connect(self._regenerate)
-        cl.addWidget(self.regen_btn, 0, Qt.AlignmentFlag.AlignLeft)
+        nm.addLayout(sort_row)
+        cl.addWidget(_more_options(num_more, "Numbering options"), 0, Qt.AlignmentFlag.AlignLeft)
+        cl.addWidget(num_more)
         self.card_tpl.body_layout.addWidget(self.counter_widget)
         col.addWidget(self.card_tpl)
 
-        # 3. Insert / remove
-        self.card_ins = _Card(3, "Insert & remove", expanded=False)
-        self.prefix_edit = self._line("Text before the name")
-        self.suffix_edit = self._line("Text after the name (before the extension)")
+        # 3. Add / remove text
+        self.card_ins = _Card("Add or remove text", expanded=False)
+        self.prefix_edit = self._line("Text at the start of the name")
+        self.suffix_edit = self._line("Text at the end of the name (before the extension)")
         self.insert_edit = self._line("Text to insert")
         self.insert_pos_spin = self._spin(-999, 999, 0)
-        self.insert_pos_spin.setToolTip("0 = start · 3 = after 3 chars · -2 = before the last 2 chars")
+        self.insert_pos_spin.setToolTip("0 = at the start · 3 = after 3 characters · -2 = before the last 2 characters")
         self.remove_first_spin = self._spin(0, 999, 0)
         self.remove_last_spin = self._spin(0, 999, 0)
         self.remove_chars_edit = self._line("e.g. ()[]#")
         self.card_ins.body_layout.addLayout(self._grid([
-            ("Prefix", self.prefix_edit), ("Suffix", self.suffix_edit),
-            ("Insert", self.insert_edit), ("…at position", self.insert_pos_spin),
-            ("Remove first", self.remove_first_spin), ("Remove last", self.remove_last_spin),
-            ("Remove chars", self.remove_chars_edit),
+            ("Add at start", self.prefix_edit), ("Add at end", self.suffix_edit),
+            ("Delete these", self.remove_chars_edit),
         ]))
+        ins_more = QWidget()
+        im = QVBoxLayout(ins_more)
+        im.setContentsMargins(0, 0, 0, 0)
+        im.addLayout(self._grid([
+            ("Insert text", self.insert_edit), ("…after N characters", self.insert_pos_spin),
+            ("Delete first N", self.remove_first_spin), ("Delete last N", self.remove_last_spin),
+        ]))
+        self.card_ins.body_layout.addWidget(_more_options(ins_more), 0, Qt.AlignmentFlag.AlignLeft)
+        self.card_ins.body_layout.addWidget(ins_more)
         col.addWidget(self.card_ins)
 
-        # 4. Case
-        self.card_case = _Card(4, "Case", expanded=False)
-        self.case_combo = self._combo(["Keep", "lowercase", "UPPERCASE", "Title Case", "Sentence case",
+        # 4. Letter case
+        self.card_case = _Card("Letter case", expanded=False)
+        self.case_combo = self._combo(["Keep as is", "lowercase", "UPPERCASE", "Title Case", "Sentence case",
                                        "snake_case", "kebab-case", "camelCase", "PascalCase"])
-        self.ext_lower_cb = self._check("Lowercase the extension")
-        self.ext_norm_cb = self._check("Normalise extensions (.jpeg → .jpg, .tif → .tiff)")
+        self.ext_lower_cb = self._check("Make the extension lowercase (.PNG → .png)")
+        self.ext_norm_cb = self._check("Use standard extensions (.jpeg → .jpg, .tif → .tiff)")
         self.card_case.body_layout.addLayout(self._grid([("Name", self.case_combo)]))
         self.card_case.body_layout.addWidget(self.ext_lower_cb)
         self.card_case.body_layout.addWidget(self.ext_norm_cb)
         col.addWidget(self.card_case)
 
-        # 5. Cleanup
-        self.card_clean = _Card(5, "Cleanup", expanded=False)
-        self.accents_cb = self._check("Strip accents (é → e)")
-        self.illegal_cb = self._check('Remove illegal characters  \\ / : * ? " < > |')
-        self.trim_cb = self._check("Trim leading/trailing whitespace")
+        # 5. Tidy up
+        self.card_clean = _Card("Tidy up", expanded=False)
+        self.accents_cb = self._check("Remove accents (é → e)")
+        self.illegal_cb = self._check('Remove characters not allowed in file names  \\ / : * ? " < > |')
+        self.trim_cb = self._check("Remove spaces at the start and end")
         self.spaces_combo = self._combo(["Keep spaces", "Spaces → _", "Spaces → -"])
-        self.collapse_cb = self._check("Collapse repeated separators (__ → _)")
-        self.edges_cb = self._check("Strip leading/trailing separators and dots")
+        self.collapse_cb = self._check("Merge repeated separators (__ → _)")
+        self.edges_cb = self._check("Remove separators and dots at the start and end")
         for w in (self.accents_cb, self.illegal_cb, self.trim_cb):
             self.card_clean.body_layout.addWidget(w)
         self.card_clean.body_layout.addLayout(self._grid([("Spaces", self.spaces_combo)]))
@@ -1162,6 +1250,7 @@ class PowerRenameDialog(QDialog):
 
         col.addStretch(1)
         scroll.setWidget(host)
+        self.template_edit.setCursorPosition(0)
         self._update_template_visibility()
         return scroll
 
@@ -1197,9 +1286,8 @@ class PowerRenameDialog(QDialog):
         hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         hh.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        hh.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        hh.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         self.table.setColumnWidth(0, 48)
-        self.table.setColumnWidth(3, 190)
         lay.addWidget(self.table, 1)
         return host
 
@@ -1307,7 +1395,29 @@ class PowerRenameDialog(QDialog):
         mode = self.mode_combo.currentIndex()
         self.seq_widget.setVisible(mode == 1)
         self.tpl_widget.setVisible(mode == 2)
-        self.counter_widget.setVisible(mode != 0)
+        # Numbering only shows when the name is typed, or when the pattern contains {n}.
+        text = self.template_edit.text()
+        uses_number = mode == 1 or (mode == 2 and template_uses_number(text))
+        self.counter_widget.setVisible(uses_number)
+        # {rand} is the only thing the "New random text" button affects.
+        self.regen_btn.setVisible(mode == 2 and "{rand" in text)
+        # Warn when a pattern would give every file the same name.
+        varies = ("{n", "{name", "{original", "{rand", "{mtime", "{ctime", "{w", "{h", "{size")
+        same = mode == 2 and len(self.filepaths) > 1 and not any(t in text for t in varies)
+        if same:
+            self.template_hint.setText("Every file would get this same name. Click “Number” or “Current name” "
+                                       "above to tell them apart.")
+        self.template_hint.setVisible(same)
+
+    def _reset(self) -> None:
+        self._set_options(default_options())
+        self._cursor_before_pattern()
+
+    def _focus_pattern(self) -> None:
+        """After the user picks "Build from a pattern", put the cursor at the start so they can type a name."""
+        if self.mode_combo.currentIndex() == 2:
+            self.template_edit.setFocus()
+            self.template_edit.setCursorPosition(0)
 
     def _regenerate(self) -> None:
         self._rand_seed = random.getrandbits(32)
@@ -1331,12 +1441,12 @@ class PowerRenameDialog(QDialog):
         idx = self.preset_combo.findText(select) if select else 0
         self.preset_combo.setCurrentIndex(max(0, idx))
         self.preset_combo.blockSignals(False)
-        self.btn_delete_preset.setEnabled(select in self._user_presets)
+        self.btn_delete_preset.setVisible(select in self._user_presets)
 
     def _on_preset_chosen(self, index: int) -> None:
         name = self.preset_combo.itemText(index)
         data = BUILTIN_PRESETS.get(name) or self._user_presets.get(name)
-        self.btn_delete_preset.setEnabled(name in self._user_presets)
+        self.btn_delete_preset.setVisible(name in self._user_presets)
         if data is not None:
             self._set_options(options_from_dict(data))
 
@@ -1440,6 +1550,8 @@ class PowerRenameDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _apply_shortcut(self) -> None:
+        if self._timer.isActive():
+            self._preview()                 # Enter right after typing: use the final text, not the 100 ms old preview
         if self.btn_apply.isEnabled():
             self.accept()
 

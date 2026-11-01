@@ -89,12 +89,6 @@ DEFS: List[ShortcutDef] = [
     _act("undo_rename", "Undo Last Rename", "Edit", ""),
     _act("choose_sticker", "Choose Sticker…", "Edit", ""),
     _act("reset_steps", "Reset Step Counter", "Edit", ""),
-    # -- Capture ------------------------------------------------------------
-    _act("capture_region", "Capture Region", "Capture", ""),
-    _act("capture_fullscreen", "Capture Fullscreen", "Capture", ""),
-    _act("capture_window", "Capture Active Window", "Capture", ""),
-    _act("capture_monitor", "Capture Monitor", "Capture", ""),
-    _act("capture_scroll", "Scrolling Capture", "Capture", ""),
     # -- View ---------------------------------------------------------------
     _act("zoom_in", "Zoom In", "View", "Ctrl+="),
     _act("zoom_out", "Zoom Out", "View", "Ctrl+-"),
@@ -108,7 +102,7 @@ DEFS: List[ShortcutDef] = [
 
 _BY_ID: Dict[str, ShortcutDef] = {d.id: d for d in DEFS}
 
-GROUPS: Tuple[str, ...] = ("Tools", "File", "Edit", "Capture", "View", "Help", "Configure")
+GROUPS: Tuple[str, ...] = ("Tools", "File", "Edit", "View", "Help", "Configure")
 
 
 # ---------------------------------------------------------------------------

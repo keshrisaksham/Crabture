@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Crabture — Nautilus script "Edit with Crabture".
+# Opens ALL the selected images in ONE Crabture window: the first is edited and the gallery
+# lists just the selection.  A single image shows the folder it lives in.
+
+CRABTURE="$HOME/.local/bin/crabture"
+[ -x "$CRABTURE" ] || CRABTURE="$(command -v crabture || true)"
+if [ -z "$CRABTURE" ]; then
+    rm -f -- "$0" 2>/dev/null        # Crabture was uninstalled: remove this stale menu entry
+    exit 0
+fi
+
+FILES=()
+while IFS= read -r candidate; do
+    candidate="${candidate%$'\r'}"
+    [ -f "$candidate" ] || continue
+    case "${candidate,,}" in
+        *.png|*.jpg|*.jpeg|*.bmp|*.webp|*.gif|*.tif|*.tiff) FILES+=("$candidate") ;;
+    esac
+done <<< "$NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"
+
+if [ "${#FILES[@]}" -eq 0 ]; then
+    msg="Select an image file (png, jpg, bmp, webp, gif, tiff) to edit with Crabture."
+    if command -v notify-send >/dev/null 2>&1; then notify-send "Crabture" "$msg"; else echo "$msg" >&2; fi
+    exit 1
+fi
+exec "$CRABTURE" "${FILES[@]}"

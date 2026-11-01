@@ -33,6 +33,8 @@ from typing import Callable, Iterable, List, Optional, Sequence, Set, Tuple, Uni
 from PyQt6.QtCore import QRectF, Qt
 from PyQt6.QtGui import QColor, QImage, QPainter
 
+from crabture import osinfo
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  tesseract discovery
@@ -40,7 +42,22 @@ from PyQt6.QtGui import QColor, QImage, QPainter
 
 # Extra places to look when ``tesseract`` is not on PATH (e.g. GUI launchers
 # with a trimmed PATH).  Module-level so tests can override it.
-FALLBACK_DIRS: Tuple[str, ...] = ("/usr/bin", "/usr/local/bin", "/snap/bin", "/opt/homebrew/bin")
+if osinfo.IS_WINDOWS:
+    FALLBACK_DIRS: Tuple[str, ...] = tuple(
+        os.path.join(base, *rest)
+        for base, rest in (
+            (os.environ.get("ProgramFiles", r"C:\Program Files"), ("Tesseract-OCR",)),
+            (os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), ("Tesseract-OCR",)),
+            (os.environ.get("LOCALAPPDATA", ""), ("Programs", "Tesseract-OCR")),
+            (os.environ.get("ProgramData", r"C:\ProgramData"), ("chocolatey", "bin")),
+            (os.environ.get("USERPROFILE", ""), ("scoop", "shims")),
+        )
+        if base
+    )
+    _EXE_NAMES: Tuple[str, ...] = ("tesseract.exe",)
+else:
+    FALLBACK_DIRS = ("/usr/bin", "/usr/local/bin", "/snap/bin", "/opt/homebrew/bin")
+    _EXE_NAMES = ("tesseract",)
 
 
 class OcrError(RuntimeError):
@@ -63,9 +80,10 @@ def tesseract_path() -> Optional[str]:
     if found:
         return found
     for directory in FALLBACK_DIRS:
-        candidate = os.path.join(directory, "tesseract")
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
+        for name in _EXE_NAMES:
+            candidate = os.path.join(directory, name)
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
     return None
 
 
@@ -75,7 +93,17 @@ def ocr_available() -> bool:
 
 
 def install_hint() -> str:
-    """Human-readable instructions for installing tesseract on Debian/Kali."""
+    """Human-readable instructions for installing tesseract on this system."""
+    if osinfo.IS_WINDOWS:
+        return (
+            "Tesseract OCR is not installed.\n"
+            "Install it from a Command Prompt with:\n"
+            "    winget install UB-Mannheim.TesseractOCR\n"
+            "or download the installer from https://github.com/UB-Mannheim/tesseract/wiki\n"
+            "(tick the extra languages you need). Crabture finds it in C:\\Program Files\\Tesseract-OCR\n"
+            "automatically; if you put it elsewhere, set the CRABTURE_TESSERACT environment variable\n"
+            "to the full path of tesseract.exe."
+        )
     return (
         "Tesseract OCR is not installed.\n"
         "Install it with:\n"
@@ -100,7 +128,7 @@ def list_languages(refresh: bool = False) -> List[str]:
         try:
             proc = subprocess.run(
                 [exe, "--list-langs"], capture_output=True, timeout=15,
-                env=_tesseract_env(),
+                env=_tesseract_env(), **_hidden_console(),
             )
             out = proc.stdout.decode("utf-8", "replace").splitlines()
             # First line is "List of available languages (N):".
@@ -112,6 +140,13 @@ def list_languages(refresh: bool = False) -> List[str]:
         langs = ["eng"]
     _lang_cache = langs
     return list(langs)
+
+
+def _hidden_console() -> dict:
+    """``subprocess`` arguments that keep a console window from flashing up on Windows."""
+    if osinfo.IS_WINDOWS:
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+    return {}
 
 
 def _tesseract_env() -> dict:
@@ -199,10 +234,7 @@ def _prepare_image(image: QImage) -> QImage:
 
 def _kill(proc: "subprocess.Popen") -> None:
     """Kill *proc* and its process group, then reap it."""
-    try:
-        os.killpg(proc.pid, 9)
-    except (OSError, ProcessLookupError):
-        proc.kill()
+    osinfo.kill_process_tree(proc)
     try:
         proc.communicate(timeout=2)
     except subprocess.TimeoutExpired:
@@ -245,7 +277,7 @@ def run_ocr(
         try:
             proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=_tesseract_env(),
-                start_new_session=True,      # own process group so a kill takes children too
+                **osinfo.subprocess_kwargs(),   # own process group / no console window
             )
         except OSError as exc:
             raise OcrError(f"Could not start tesseract: {exc}") from exc

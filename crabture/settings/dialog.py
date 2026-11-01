@@ -7,12 +7,14 @@ A tabbed settings dialog whose edits apply LIVE and persist immediately
   • Shortcuts      – every tool key and menu shortcut (settings/keymap.py)
   • Tools          – per-tool defaults: colour, widths, font sizes … (settings/tool_config.py)
   • Sensitive data – the saved sensitive-data scan profile (redact/profile.py)
-  • General        – theme, capture defaults, "reset everything"
+  • Capture        – screenshot folder, file name, behaviour and capture shortcuts
+                     (settings/capture_page.py)
+  • General        – theme, "reset everything"
 
 Public API::
 
-    SettingsDialog(parent=None, initial_tab=None)   # 'shortcuts'|'tools'|'sensitive'|'general'
-    settings_signals.capture_changed                # emitted when capture defaults change
+    SettingsDialog(parent=None, initial_tab=None)   # 'shortcuts'|'tools'|'capture'|'sensitive'|'general'
+    settings_signals.capture_changed                # kept for older callers (capture.config.signals is the live one)
 
 The dialog works as a normal modal (``exec()``) or as a non-modal window
 (``show()``).  Nothing here scans or redacts anything: the Sensitive-data tab
@@ -23,6 +25,7 @@ uses later.
 from __future__ import annotations
 
 import dataclasses
+import sys
 from typing import Callable, Dict, List, Optional, Tuple
 
 from PyQt6.QtCore import QObject, QPointF, QRectF, QSettings, QSize, Qt, QTimer, pyqtSignal
@@ -72,6 +75,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from crabture.capture import config as capture_config
 from crabture.settings import keymap
 from crabture.redact import core as redact
 from crabture.redact import profile as redact_profile
@@ -1290,7 +1294,8 @@ class _ToolsPage(QWidget):
 class _SensitivePage(QWidget):
     """Embeds the saved-profile editor; edits are saved only when the user clicks Save."""
 
-    APT_COMMAND = "sudo apt install tesseract-ocr"
+    APT_COMMAND = ("winget install UB-Mannheim.TesseractOCR" if sys.platform == "win32"
+                   else "sudo apt install tesseract-ocr")
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -1422,20 +1427,6 @@ class _SensitivePage(QWidget):
 #  4. General
 # ===========================================================================
 
-_DELAYS = (0, 1, 2, 3, 5, 10)
-
-
-def _read_capture_settings() -> Tuple[float, bool, bool]:
-    qs = QSettings("YawnByte", "Crabture")
-    try:
-        delay = float(qs.value("capture/delay", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        delay = 0.0
-    hide = str(qs.value("capture/hide", "true")).lower() != "false"
-    clip = str(qs.value("capture/clipboard", "false")).lower() == "true"
-    return delay, hide, clip
-
-
 class _GeneralPage(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -1472,29 +1463,9 @@ class _GeneralPage(QWidget):
         lay.addWidget(note)
         col.addWidget(card)
 
-        # -- Capture defaults --
-        card, lay = _card("Capture defaults",
-                          "Used by the Capture menu and the capture button. They are also available from the Capture menu.")
-        drow = QHBoxLayout()
-        drow.addWidget(QLabel("Delay before capturing"))
-        self.delay = QComboBox()
-        for s in _DELAYS:
-            self.delay.addItem("None" if s == 0 else f"{s} s", float(s))
-        self.delay.currentIndexChanged.connect(self._on_capture_edit)
-        drow.addWidget(self.delay)
-        drow.addStretch(1)
-        lay.addLayout(drow)
-        self.hide_cb = QCheckBox("Hide the Crabture window while capturing")
-        self.clip_cb = QCheckBox("Copy every capture to the clipboard")
-        self.hide_cb.toggled.connect(self._on_capture_edit)
-        self.clip_cb.toggled.connect(self._on_capture_edit)
-        lay.addWidget(self.hide_cb)
-        lay.addWidget(self.clip_cb)
-        col.addWidget(card)
-
         # -- Reset everything --
         card, lay = _card("Reset",
-                          "Restores shortcuts, tool settings, the sensitive-data profile and capture defaults. "
+                          "Restores shortcuts, tool settings, the sensitive-data profile and the capture settings. "
                           "Your theme choice is kept.")
         self.btn_reset_all = _button("Reset ALL settings to defaults", "danger", "refresh")
         self.btn_reset_all.clicked.connect(self.reset_everything)
@@ -1514,32 +1485,17 @@ class _GeneralPage(QWidget):
         self._loading = True
         pref = theme.initial_theme()
         self.theme_buttons.get(pref, self.theme_buttons["system"]).setChecked(True)
-        delay, hide, clip = _read_capture_settings()
-        idx = min(range(self.delay.count()), key=lambda i: abs(self.delay.itemData(i) - delay))
-        self.delay.setCurrentIndex(idx)
-        self.hide_cb.setChecked(hide)
-        self.clip_cb.setChecked(clip)
         self._loading = was
 
     def _on_theme(self, name: str) -> None:
         if not self._loading:
             theme.set_theme_preference(name)
 
-    def _on_capture_edit(self, *_args) -> None:
-        if self._loading:
-            return
-        qs = QSettings("YawnByte", "Crabture")
-        qs.setValue("capture/delay", float(self.delay.currentData()))
-        qs.setValue("capture/hide", "true" if self.hide_cb.isChecked() else "false")
-        qs.setValue("capture/clipboard", "true" if self.clip_cb.isChecked() else "false")
-        qs.sync()
-        settings_signals.capture_changed.emit()
-
     def reset_everything(self) -> None:
         r = QMessageBox.warning(
             self, "Reset all settings",
             "Reset ALL settings to their defaults?\n\n"
-            "• keyboard shortcuts\n• tool settings\n• the sensitive-data profile\n• capture defaults\n\n"
+            "• keyboard shortcuts\n• tool settings\n• the sensitive-data profile\n• capture folder, behaviour and shortcuts\n\n"
             "Your theme choice is kept. This cannot be undone.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel)
@@ -1548,10 +1504,8 @@ class _GeneralPage(QWidget):
         keymap.reset_all()
         tool_config.reset_all()
         redact_profile.save_profile(redact_profile.default_profile())
-        qs = QSettings("YawnByte", "Crabture")
-        for key in ("capture/delay", "capture/hide", "capture/clipboard"):
-            qs.remove(key)
-        qs.sync()
+        capture_config.reset_preferences()
+        capture_config.reset_shortcuts()
         self.reload()
         settings_signals.capture_changed.emit()
 
@@ -1563,6 +1517,7 @@ class _GeneralPage(QWidget):
 _TABS = (
     ("shortcuts", "Shortcuts", "keyboard"),
     ("tools", "Tools", "palette"),
+    ("capture", "Capture", "capture"),
     ("sensitive", "Sensitive data", "shield"),
     ("general", "General", "settings"),
 )
@@ -1591,7 +1546,7 @@ class SettingsDialog(QDialog):
         hv.setSpacing(2)
         title = QLabel("Configure")
         _role(title, "h1")
-        sub = QLabel("Shortcuts, tool defaults, the sensitive-data scan and general preferences. "
+        sub = QLabel("Shortcuts, tool defaults, screenshot capture, the sensitive-data scan and general preferences. "
                      "Changes apply immediately.")
         sub.setWordWrap(True)
         _role(sub, "muted")
@@ -1620,9 +1575,12 @@ class SettingsDialog(QDialog):
         self.tools_page = _ToolsPage()
         self.sensitive_page = _SensitivePage()
         self.general_page = _GeneralPage()
+        from crabture.settings.capture_page import CapturePage     # imports helpers from this module
+        self.capture_page = CapturePage()
         self._pages = {
             "shortcuts": self.shortcuts_page,
             "tools": self.tools_page,
+            "capture": self.capture_page,
             "sensitive": self.sensitive_page,
             "general": self.general_page,
         }
@@ -1665,6 +1623,18 @@ class SettingsDialog(QDialog):
     def current_tab(self) -> str:
         return _TABS[max(0, self.nav.currentRow())][0]
 
+    def show_tool(self, tool: str) -> None:
+        """Jump to Tools ▸ *tool* (used by the Properties panel's configure button)."""
+        self.set_tab("tools")
+        if tool in tool_config.TOOL_LABELS:
+            self.tools_page.select_tool(tool)
+
+    def focus_capture_folder(self) -> None:
+        """Jump to Capture and put the cursor in the screenshot-folder field."""
+        self.set_tab("capture")
+        self.capture_page.folder.setFocus()
+        self.capture_page.folder.selectAll()
+
     def _on_nav(self, row: int) -> None:
         if row < 0:
             return
@@ -1674,6 +1644,8 @@ class SettingsDialog(QDialog):
             self.sensitive_page.refresh_ocr_state()
         elif key == "general":
             self.general_page.reload()
+        elif key == "capture":
+            self.capture_page.refresh_status()
 
     # ------------------------------------------------------------- lifecycle
 

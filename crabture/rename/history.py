@@ -7,7 +7,8 @@ so permutations (a -> b, b -> a) work, and it rolls a file back when its
 final move fails.  Both Power Rename's Apply and its Undo use it.
 
 The journal lives at ``$XDG_STATE_HOME/crabture/rename_history.json``
-(default ``~/.local/state/crabture/rename_history.json``).  It keeps the last
+(default ``~/.local/state/crabture/rename_history.json``; on Windows
+``%LOCALAPPDATA%\\Crabture\\rename_history.json``).  It keeps the last
 ``MAX_BATCHES`` batches and is written atomically.
 """
 
@@ -19,6 +20,8 @@ import tempfile
 import time
 import uuid
 from typing import Optional
+
+from crabture import osinfo
 
 MAX_BATCHES = 20
 JOURNAL_VERSION = 1
@@ -71,8 +74,7 @@ def perform_renames(pairs: list[tuple[str, str]]) -> tuple[dict[str, str], list[
 # ---------------------------------------------------------------------------
 
 def journal_path() -> str:
-    base = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
-    return os.path.join(base, "crabture", "rename_history.json")
+    return os.path.join(osinfo.state_dir(), "rename_history.json")
 
 
 def _load() -> list[dict]:

@@ -11,11 +11,16 @@ It captures your screen (X11 *and* Wayland, because apparently we can't have nic
 ### 📷 Screen capture
 *Because Print Screen alone was apparently too easy.*
 
-- **Region** (a frozen-screen overlay where you drag a rectangle, like it's 2009), **fullscreen**, **active window**, **monitor under the cursor**, and **scrolling capture** (you scroll, Crabture stitches the frames, everyone pretends it was effortless).
-- Works on **X11** and **Wayland**. On Wayland it talks to the xdg-desktop-portal like a well-behaved citizen; on X11 it can also use `maim`, `scrot` or ImageMagick `import` if you have them lying around. Window capture on Wayland opens the system picker, because the compositor said "no" to everything else.
-- Options for a **delay**, **hiding Crabture while capturing** (so you don't screenshot Crabture screenshotting — truly a groundbreaking feature), and **copy to clipboard**. Captures land in `~/Downloads/Crabshots` and open in the editor automatically.
-- From the command line: `crabture --capture region|fullscreen|window|monitor|scroll [--delay S]`.
-- `crabture --register-hotkeys` (or the Capture menu) adds GNOME shortcuts. It **never overwrites** one you already use. We're not monsters.
+- **Crabture's own region selector is the default** (a frozen-screen overlay with ✔/✖ buttons, a pixel loupe and size readout). Prefer your desktop's own tool (GNOME's screenshot UI on Wayland, `xfce4-screenshooter` on Kali/Xfce, `gnome-screenshot` on Debian GNOME/X11)? Switch the tool in Configure ▸ Capture. If a tool is missing or fails, the next method takes over. Modes: region, **fullscreen**, **window** (on X11 and Windows the active window; on Wayland, where compositors will not say where windows are, Crabture outlines the window under your pointer by looking for its borders in the frozen picture: click to capture, `↑`/`↓` or the scroll wheel to step to a bigger or smaller candidate when the first guess is off, `Space` to draw a region instead), **monitor** (click the one you want when you have several), and **scrolling capture** (you scroll, Crabture stitches the frames, everyone pretends it was effortless).
+- Works on **X11** and **Wayland**. On Wayland it talks to the xdg-desktop-portal like a well-behaved citizen (on GNOME the portal only grants a silent screenshot to a *focused window*, so Crabture asks through a tiny invisible helper window; if that is ever refused it falls back to the plain portal call and finally to GNOME's own picker); on X11 it can also use `maim`, `scrot` or ImageMagick `import` if you have them lying around. Window capture on Wayland opens the system picker, because the compositor said "no" to everything else.
+- **Save wherever you like.** Configure ▸ Capture sets the folder (default `~/Downloads/Crabshots`), the file name pattern (`Crabture_%Y-%m-%d_%H-%M-%S`, with `{mode}` if you want it) and the format (PNG, JPEG, WebP). Files appear atomically, so the gallery never sees a half-written screenshot.
+- **As many capture shortcuts as you want.** Each one takes one kind of screenshot and can have its own delay, its own folder and its own "then" (**just save it** — the default, with a notification — or open it in the editor). One for regions, one for the whole screen into `~/Work/shots`, one for a window after 3 seconds... knock yourself out.
+- **Works from anywhere.** "Apply to desktop" in the same tab hands the shortcuts to **GNOME** or **Xfce**. It never touches a shortcut you already use, skips (and tells you about) any key that is taken, and removes only its own. On other desktops it shows the exact commands to bind by hand.
+- If Crabture is already running, a shortcut is handed to that instance (instant, no second window). If not, a shortcut that only saves runs **without opening any window at all**.
+- A shortcut, tray or command-line capture **never hides or pops up Crabture's own window**, so you can screenshot Crabture itself (region, full screen or window). Only captures started from Crabture's own buttons and menus hide it first (switch that off with *Hide the Crabture window while capturing* in Configure ▸ Capture).
+- Options for a **delay** (our own window hides *before* the countdown, so you can set the scene), **copy to clipboard**, and **region capture on mouse release**.
+- From the command line: `crabture --capture region|fullscreen|window|monitor|scroll [--delay S] [--folder DIR] [--after editor|save] [--clipboard]`.
+- `crabture --register-hotkeys` applies the shortcuts saved in Configure ▸ Capture. It **never overwrites** one you already use. We're not monsters.
 
 ### 🖍 Annotation tools
 *Seventeen of them. You'll use three.*
@@ -50,6 +55,7 @@ Needs `tesseract-ocr`. (Yes, you have to install it. Software doesn't write itse
 - **Remap every tool key and menu shortcut**, with conflict checks, reset, and import/export. Yes, you can make `R` do something other than Rectangle. We won't ask why.
 - **Per-tool defaults:** stroke widths, font and step sizes, sticker, blur strength, spotlight darkness, magnifier size, and more. Finally, a way to make every arrow *exactly* the thickness you like.
 - Theme (**System / Light / Dark**) and capture defaults.
+- The **gear button in the Properties panel** (top right) opens Configure ▸ Tools on the tool you are using; **Configure ▸ Screenshot Folder…** jumps straight to the folder setting (Capture tab). Save As and Open start in that folder too.
 
 ### 🧑‍🎨 A UI that doesn't look like 2004
 - A **welcome page** with capture/open buttons and your recent captures, for when you launch the app with no plan, as one does.
@@ -68,23 +74,29 @@ Needs `tesseract-ocr`. (Yes, you have to install it. Software doesn't write itse
   - **Details:** name, size, date and dimensions columns. Click a header to sort, like an adult.
   - **Compact:** names only, for people who think thumbnails are for show-offs.
 - **Sort** by name (in *natural* order, so `Test_2` comes before `Test_10` and mathematicians can sleep), date modified, size or dimensions. Your view and sort choices are remembered.
-- Right-click for Open, Power Rename, Open in File Manager, or Copy Path.
+- Right-click for Open, Power Rename, Open in File Manager, or Copy Path. **Select several files and "Open N selected files"** to open them as *one session*: the first is edited and the gallery lists only those files (right-click ▸ *Show the whole folder* to go back).
+- The gallery always shows the folder you opened: a file opened from anywhere (File ▸ Open, drag and drop, the command line, "Open With") switches it to that file's folder; `--directory` or "Open Folder" picks one explicitly.
 
 ### ⚡ Power Rename (`Ctrl+R` on selected gallery items)
 *Because `Screenshot from 2026-10-12 19-19-10 (3).png` is not a name, it's a cry for help.*
 
-- **Pipeline:** Find & Replace (plain or regex with capture groups, whole-word matching) → name template/numbering → insert/remove → case conversion → cleanup.
-- **Template tokens:** `{name}` `{ext}` `{n:03}` `{date}` `{mtime:%Y-%m-%d}` `{parent}` `{w}` `{h}` `{size}` `{rand:6}` `{original}`. Numbering can follow name (natural sort), date, size or dimensions.
+- **Five simple groups:** *Find & replace* (plain or regex; extra options under "More options") → *New name* (keep it, type one, or build it from a pattern; numbering options appear only when the name has a number) → *Add or remove text* → *Letter case* → *Tidy up*. Groups you don't use stay collapsed, and a small ON badge shows which ones are active.
+- **Pattern parts** (click-to-add buttons in the dialog, or type them): `{name}` `{ext}` `{n:03}` `{date}` `{mtime:%Y-%m-%d}` `{parent}` `{w}` `{h}` `{size}` `{rand:6}` `{original}`. Numbering can follow name (natural sort), date, size or dimensions.
 - Presets (built-in and your own), a live preview with conflict detection, **safe swaps** (rename a→b and b→a without anything exploding), and **Undo Last Rename** (`Edit ▸ Undo Last Rename`) for the moment you regret everything.
 
 ### 🐧 Linux integration
-`./scripts/builder.sh --install` adds an application-menu entry (so Crabture shows up in "Open With" for common image types) and two Nautilus scripts (right-click ▸ Scripts):
+`./scripts/builder.sh --install` adds an application-menu entry (so Crabture shows up in "Open With" for common image types, several files at once) and two Nautilus scripts (right-click ▸ Scripts):
 
 - **Open Directory with Crabture**
-- **Edit with Crabture** — opens the selected image in the editor with its folder in the gallery. Two whole right-click entries. We're spoiling you.
+- **Edit with Crabture** — opens *all* selected images in one Crabture window (a single image shows its folder in the gallery). Two whole right-click entries. We're spoiling you.
+
+The `.deb` ships the same scripts and its installer puts them into the Nautilus scripts folder of every user on the machine (and of users created later), so the entries are there right after `apt install`; `apt remove` takes back only the files that are Crabture's. Restart Nautilus once (`nautilus -q`) if the *Scripts* menu does not show up yet. However you open files (right-click, Open With, the command line), they all go to **one** Crabture window: launches that happen at the same moment, or while Crabture is already open, are merged into a single session instead of opening a window each. `crabture --install-integration` / `--remove-integration` do it (or undo it) by hand. (Thunar and other file managers: use "Open With ▸ Crabture".)
+
+### 🪟 Windows integration
+The installer (see [Windows](#-windows)) adds a Start-menu entry and, if you tick the boxes, **Edit with Crabture** on every image, **Open folder with Crabture** on folders, and a notification-area icon that starts at sign-in so the capture shortcuts work everywhere.
 
 ## 🚀 Installation
-*Steps: three. Difficulty: you'll survive.*
+*Steps: three. Difficulty: you'll survive.* (On Windows, jump to [Windows](#-windows).)
 
 1. Install the dependency (a virtual environment is recommended, but we're not your mum):
    ```bash
@@ -108,6 +120,33 @@ Other builder commands, for the indecisive:
 
 `--build` needs PyInstaller; the script explains how to get it if it's missing, in a refreshingly non-judgemental tone.
 
+## 🪟 Windows
+*Same crab, different shell.* Windows 10 / 11, Python 3.10+.
+
+**Run from source**
+
+```powershell
+py -3 -m pip install -r requirements.txt
+py -3 main.py
+```
+
+**Build an installer** (PyInstaller bundle + Inno Setup `Setup.exe`):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1              # -> dist\Crabture\Crabture.exe
+powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1 -Installer   # -> dist\Crabture-<version>-Setup.exe
+```
+
+The installer needs [Inno Setup 6](https://jrsoftware.org/isinfo.php) (`winget install JRSoftware.InnoSetup`).
+
+What's different from Linux:
+
+- **Capture** uses Qt's own screen grab and Crabture's frozen-screen selector; there is no portal or helper tool to install. *Active window* uses the Win32 foreground window (visible frame, no drop shadow), and *scrolling capture* can turn the mouse wheel for you.
+- **Global shortcuts:** Windows has no shortcut database to write to, so **Configure ▸ Capture ▸ Apply to desktop** makes Crabture start in the notification area at sign-in (`crabture --background`) and register the keys itself (`RegisterHotKey`). A key another program already owns is reported in a notification instead of failing silently. *Remove from desktop* undoes it.
+- **Notifications** are tray balloons / toasts.
+- **OCR:** install Tesseract with `winget install UB-Mannheim.TesseractOCR`; Crabture finds it in `C:\Program Files\Tesseract-OCR`, or set `CRABTURE_TESSERACT` to the full path of `tesseract.exe`.
+- **Files:** logs and the rename undo journal live in `%LOCALAPPDATA%\Crabture`; settings are in the registry (`HKCU\Software\YawnByte\Crabture`).
+
 ## 📦 Debian package
 *For people who believe software should arrive via `apt` or not at all.*
 
@@ -130,16 +169,19 @@ Before publishing the package, set the maintainer in `packaging/build_deb.sh` an
 
 ```bash
 crabture                          # start with the default gallery folder
-crabture path/to/image.png        # open an image in the editor
+crabture path/to/image.png        # open an image in the editor (the gallery shows its folder)
+crabture a.png b.png c.png        # open several images as one session (gallery lists just these)
 crabture --directory ~/Pictures   # show a folder in the gallery (-d)
 crabture --capture region         # take a screenshot straight away
 crabture --capture window --delay 3
-crabture --register-hotkeys       # add GNOME shortcuts (Ctrl+Print, Ctrl+Shift+Print, Ctrl+Alt+Print)
+crabture --capture fullscreen --after save --folder ~/Work/shots   # no window, just a file (and a notification)
+crabture --register-hotkeys       # give the shortcuts from Configure ▸ Capture to GNOME / Xfce
 crabture --unregister-hotkeys     # remove only the shortcuts Crabture added
+crabture --install-integration    # add the right-click entries to Nautilus (--remove-integration undoes it)
 crabture --backend-info           # which capture backend would be used
 ```
 
-The first Wayland capture may show a GNOME permission prompt. That's GNOME checking you really meant it. Scrolling capture on Wayland **cannot auto-scroll** (the compositor won't let apps drive your mouse, which is fair): scroll yourself and press `Space` (or the button) to grab each frame.
+The starter capture shortcuts are `Ctrl+Shift+Print` (region), `Ctrl+Print` (full screen) and `Ctrl+Alt+Print` (window); they are only given to the desktop when you press "Apply to desktop", because surprise keyboard shortcuts are rude. The first Wayland capture may show a GNOME permission prompt. That's GNOME checking you really meant it. A save-only capture that also copies to the clipboard keeps a tiny background process alive until something else is copied (otherwise the clipboard would vanish with it). Scrolling capture on Wayland **cannot auto-scroll** (the compositor won't let apps drive your mouse, which is fair): scroll yourself and press `Space` (or the button) to grab each frame.
 
 Or run straight from the source tree with `python3 main.py`, like a purist.
 
@@ -194,32 +236,37 @@ Crabture/
 ├── requirements.txt
 ├── assets/                 # logo.png (the app icon), logo.svg
 ├── scripts/
-│   └── builder.sh          # install / reinstall / uninstall / build / --deb
-├── packaging/              # everything the .deb needs (control bits, man page, desktop file)
+│   ├── builder.sh          # install / reinstall / uninstall / build / --deb (Linux)
+│   ├── build_windows.ps1   # PyInstaller bundle + optional Inno Setup installer (Windows)
+│   └── make_icon.py        # assets/logo.png -> assets/logo.ico
+├── packaging/              # the .deb's control bits, man page, desktop file; nautilus/ has the right-click scripts; windows/ has the Inno Setup script
 └── crabture/               # the actual application (a proper Python package, finally)
     ├── app.py              # command-line parsing and startup
     ├── version.py          # the one place the version number lives
     ├── resources.py        # finds assets/ whether run from source, .deb or PyInstaller
     ├── ui/                 # main window, panels, dialogs, tool rail, welcome page, theme, icons
     ├── editor/             # canvas, annotation items, undo/layer models, eyedropper loupe
-    ├── capture/            # screen capture (X11 + Wayland), overlays, GNOME hotkeys
+    ├── osinfo.py           # the few OS differences: data dirs, process kill, reveal-in-file-manager
+    ├── ipc.py              # hands `--capture` to an already running Crabture
+    ├── integration.py      # installs/removes the right-click (Nautilus) scripts for the current user
+    ├── capture/            # screen capture (X11, Wayland, Windows): service, overlays, controller, saving/config, desktop hotkeys (GNOME/Xfce/Windows)
     ├── effects/            # border/shadow/torn-edge/watermark effects and their dialog
     ├── redact/             # sensitive-data finder, saved profile, dialogs
     ├── rename/             # Power Rename dialog and its undo journal
-    └── settings/           # Configure window, remappable shortcuts, per-tool defaults
+    └── settings/           # Configure window (incl. the Capture tab), remappable shortcuts, per-tool defaults
 ```
 
 Run it from source with `python3 main.py`. Poke at the guts with e.g. `python3 -m crabture.ui.icons /tmp/icons` (writes an icon contact sheet).
 
 ## 🛠 Prerequisites
 
-- Python 3.10+
+- Python 3.10+ on Linux or Windows 10/11
 - PyQt6 (`pip install -r requirements.txt`)
-- Optional, but you'll want them: `tesseract-ocr` (sensitive-data scan), `xdotool` (X11 window capture and auto-scroll), `maim`/`scrot`/`gnome-screenshot`/`grim` (extra capture backends)
+- Optional, but you'll want them: Tesseract OCR (sensitive-data scan); on Linux also `xdotool` (X11 window capture and auto-scroll) and `maim`/`scrot`/`gnome-screenshot`/`grim` (extra capture backends)
 
 ## 🤷 Honest disclaimers
 
-- Most of this was tested headless, with mocks, in a sandbox. Your actual desktop remains the final boss. If something looks off on a real screen, tell us. We'll act surprised.
+- Most of this was tested headless, with mocks, in a sandbox. Your actual desktop remains the final boss. The Windows port in particular was written and unit-tested on Linux (Win32 calls mocked): a real Windows machine hasn't had its say yet. If something looks off on a real screen, tell us. We'll act surprised.
 - Real OCR quality depends on how `tesseract` feels about your screenshot that day.
 
 ## 📜 Licence

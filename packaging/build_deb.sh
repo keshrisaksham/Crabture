@@ -54,6 +54,15 @@ chmod 0755 "$ROOT/usr/bin/crabture"
 # ── 3. Desktop entry ─────────────────────────────────────────────────────────
 install -Dm 0644 "$PACKAGING_DIR/crabture.desktop" "$ROOT/usr/share/applications/crabture.desktop"
 
+# ── 3b. Right-click scripts for the file manager ─────────────────────────────
+# Nautilus only reads scripts from the user's own ~/.local/share/nautilus/scripts, so the package
+# ships them here and Crabture copies them over on first start (or `crabture --install-integration`).
+NAUTILUS_SRC="$ROOT/usr/share/crabture/nautilus-scripts"
+install -d "$NAUTILUS_SRC"
+for script in "$PACKAGING_DIR"/nautilus/*; do
+    install -m 0755 "$script" "$NAUTILUS_SRC/$(basename "$script")"
+done
+
 # ── 4. Icons (generated from assets/logo.png) ───────────────────────────────────────
 SIZES=(16 24 32 48 64 128 256 512)
 ICON_SCRIPT='

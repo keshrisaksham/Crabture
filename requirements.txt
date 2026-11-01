@@ -1,5 +1,5 @@
 # Runtime dependency. Developed and tested against PyQt6 6.11 (Qt 6.10);
 # 6.4 is an untested lower bound (the code uses the PyQt6 scoped-enum API).
 PyQt6>=6.4
-# Only needed for `./scripts/builder.sh --build`:
+# Only needed to build packages (`./scripts/builder.sh --build`, `scripts\build_windows.ps1`):
 # pyinstaller

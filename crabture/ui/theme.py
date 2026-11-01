@@ -63,6 +63,8 @@ import tempfile
 from string import Template
 from typing import Dict, Optional
 
+from crabture import osinfo
+
 from PyQt6.QtCore import QObject, QSettings, QStandardPaths, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
@@ -202,7 +204,7 @@ def _asset_dir(theme: str) -> str:
     candidates = []
     if base:
         candidates.append(os.path.join(base, "theme-assets"))
-    candidates.append(os.path.join(tempfile.gettempdir(), f"crabture-theme-{os.getuid()}"))
+    candidates.append(os.path.join(tempfile.gettempdir(), f"crabture-theme-{osinfo.user_id()}"))
     for root in candidates:
         path = os.path.join(root, theme)
         try:

@@ -31,6 +31,7 @@ Two-part workflow (configure once, run every time)::
 from __future__ import annotations
 
 import re
+import sys
 import threading
 from typing import List, Optional, Tuple
 
@@ -1038,7 +1039,9 @@ class RedactConfigWidget(QWidget):
         self._lang.setEditable(True)
         self._lang.setValidator(QRegularExpressionValidator(QRegularExpression(r"[A-Za-z0-9_+\-]*")))
         self._lang.addItems(redact.list_languages())
-        self._lang.setToolTip("Combine languages with '+', e.g. eng+deu. Extra packs: sudo apt install tesseract-ocr-<lang>")
+        self._lang.setToolTip("Combine languages with '+', e.g. eng+deu. Extra packs: "
+                              + ("tick them in the Tesseract installer" if sys.platform == "win32"
+                                 else "sudo apt install tesseract-ocr-<lang>"))
         self._lang.currentTextChanged.connect(self._emit_changed)
         form.addWidget(self._lang, 0, 1)
 

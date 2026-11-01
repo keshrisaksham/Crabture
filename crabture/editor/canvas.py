@@ -20,7 +20,7 @@ import os
 from contextlib import contextmanager
 from typing import List, Optional
 
-from PyQt6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QPoint, QPointF, QRectF, QSettings, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QBrush,
     QColor,
@@ -165,6 +165,7 @@ class EditorContainer(QGraphicsView):
         # -- State ---------------------------------------------------------
         self._bg_pixmap_item: Optional[QGraphicsPixmapItem] = None
         self._current_filepath: Optional[str] = None
+        self._last_save_error: str = ""
         self._fit_mode: bool = True
         # Eyedropper: magnifier overlay, press-and-slide picking, tool to return to on Esc.
         self._loupe = None
@@ -177,7 +178,13 @@ class EditorContainer(QGraphicsView):
         self._hand_release_pending: bool = False
         self._pan_last: Optional[QPoint] = None
         self._active_color: QColor = QColor("#FF4444")
-        self._active_alpha: int = 255
+        # The opacity slider's last value is remembered between runs.
+        try:
+            saved_alpha = int(QSettings().value("editor/opacity", 255))
+        except (TypeError, ValueError):
+            saved_alpha = 255
+        self._active_alpha: int = max(0, min(255, saved_alpha))
+        self._active_color.setAlpha(self._active_alpha)
         self._active_intensity: int = 10
         self._active_sticker: str = "😀"
         self._spotlight_shape: str = "rect"
@@ -255,7 +262,9 @@ class EditorContainer(QGraphicsView):
         # Cancel any pending crop.
         self._cancel_crop_silently()
 
-        # Reset state.
+        # Reset state.  scene.clear() deletes the old background item, so drop
+        # our reference first: modified_changed slots read background_pixmap().
+        self._bg_pixmap_item = None
         self._scene.clear()
         self.history.clear()
         self.layer_manager.clear()
@@ -276,8 +285,8 @@ class EditorContainer(QGraphicsView):
     def clear_image(self) -> None:
         """Drop the current image and all annotations (used by File > Close Image)."""
         self._cancel_crop_silently()
-        self._scene.clear()
         self._bg_pixmap_item = None
+        self._scene.clear()
         self._current_filepath = None
         self.history.clear()
         self.layer_manager.clear()
@@ -369,6 +378,7 @@ class EditorContainer(QGraphicsView):
         self._user_alpha = self._active_alpha
         self._active_color.setAlpha(self._active_alpha)
         self._user_color.setAlpha(self._active_alpha)
+        QSettings().setValue("editor/opacity", self._active_alpha)
         self._apply_color_to_selection()
 
     def _apply_color_to_selection(self) -> None:
@@ -1659,9 +1669,31 @@ class EditorContainer(QGraphicsView):
         action = self.history.get_undo_action()
         if action is None:
             return
+        self._undo_action(action)
+        self._set_modified(True)
+        self.layers_changed.emit()
+
+    def _undo_action(self, action: dict) -> None:
         atype = action.get("type")
 
-        if atype == "add_item":
+        if atype == "batch":
+            for sub in reversed(action["actions"]):
+                self._undo_action(sub)
+
+        elif atype == "layer_add":
+            self._drop_layer_with_items(action["layer"])
+
+        elif atype == "layer_remove":
+            self.layer_manager.restore_layer(action["layer"], action["layer_name"], action["layer_index"],
+                                             action["layer_visible"])
+
+        elif atype == "layer_move":
+            self._move_layer_raw(action["layer"], not action["up"])
+
+        elif atype == "layer_visibility":
+            self.layer_manager.toggle_visibility(action["layer"])
+
+        elif atype == "add_item":
             # Detach (and drop the now-empty layer); refresh the recorded
             # layer position so redo can re-create it in the same place.
             action.update(self._detach_item(action["item"]))
@@ -1691,16 +1723,35 @@ class EditorContainer(QGraphicsView):
                 self._shift_top_level_items(offset.x(), offset.y())
                 self.reset_zoom()
 
-        self._set_modified(True)
-        self.layers_changed.emit()
-
     def redo(self) -> None:
         action = self.history.get_redo_action()
         if action is None:
             return
+        self._redo_action(action)
+        self._set_modified(True)
+        self.layers_changed.emit()
+
+    def _redo_action(self, action: dict) -> None:
         atype = action.get("type")
 
-        if atype == "add_item":
+        if atype == "batch":
+            for sub in action["actions"]:
+                self._redo_action(sub)
+
+        elif atype == "layer_add":
+            self.layer_manager.restore_layer(action["layer"], action["layer_name"], action["layer_index"],
+                                             action["layer_visible"])
+
+        elif atype == "layer_remove":
+            self._drop_layer_with_items(action["layer"])
+
+        elif atype == "layer_move":
+            self._move_layer_raw(action["layer"], action["up"])
+
+        elif atype == "layer_visibility":
+            self.layer_manager.toggle_visibility(action["layer"])
+
+        elif atype == "add_item":
             self._attach_item(action)
             self._step_added_redone(action["item"])
 
@@ -1728,8 +1779,80 @@ class EditorContainer(QGraphicsView):
                     entry.update(self._detach_item(entry["item"]))
                 self.reset_zoom()
 
-        self._set_modified(True)
+    # -- layer operations (all undoable) ------------------------------------
+
+    def _drop_layer_with_items(self, layer_id: str) -> None:
+        """Remove a layer; anything still in it leaves the scene with it."""
+        for item in self.layer_manager.get_items_for_layer(layer_id):
+            self._detach_item(item)
+        if self.layer_manager.layer_info(layer_id) is not None:
+            self.layer_manager.delete_layer(layer_id)
+
+    def _move_layer_raw(self, layer_id: str, up: bool) -> bool:
+        return (self.layer_manager.move_layer_up(layer_id) if up
+                else self.layer_manager.move_layer_down(layer_id))
+
+    def add_layer(self, name: str = "") -> str:
+        """Add an empty layer on top (undoable)."""
+        if not name:
+            used = {n for _i, n, _v in self.layer_manager.layer_names()}
+            k = len(used) + 1
+            while f"Layer {k}" in used:
+                k += 1
+            name = f"Layer {k}"
+        lid = self.layer_manager.add_layer(name)
+        info = self.layer_manager.layer_info(lid)
+        self._record({"type": "layer_add", "layer": lid, "layer_name": name,
+                      "layer_index": info[1], "layer_visible": True})
         self.layers_changed.emit()
+        return lid
+
+    def move_layer(self, layer_id: str, up: bool) -> bool:
+        if not self._move_layer_raw(layer_id, up):
+            return False
+        self._record({"type": "layer_move", "layer": layer_id, "up": up})
+        self.layers_changed.emit()
+        return True
+
+    def toggle_layer_visibility(self, layer_ids) -> None:
+        """Show/hide layers (one undo step for the whole selection)."""
+        actions = []
+        for lid in dict.fromkeys(layer_ids):
+            if self.layer_manager.toggle_visibility(lid) is not None:
+                actions.append({"type": "layer_visibility", "layer": lid})
+        self._record_group(actions)
+        self.layers_changed.emit()
+
+    def _record_group(self, actions: list) -> None:
+        """Record several actions as ONE undo step."""
+        if not actions:
+            return
+        self._record(actions[0] if len(actions) == 1 else {"type": "batch", "actions": actions})
+
+    def can_undo(self) -> bool:
+        return self.history.can_undo()
+
+    def can_redo(self) -> bool:
+        return self.history.can_redo()
+
+    def undo_label(self) -> str:
+        return self._history_label(self.history.peek_undo())
+
+    def redo_label(self) -> str:
+        return self._history_label(self.history.peek_redo())
+
+    _LABELS = {"add_item": "Add Annotation", "remove_item": "Delete", "replace_image": "Image Change",
+               "crop": "Crop", "layer_add": "Add Layer", "layer_remove": "Delete Layer",
+               "layer_move": "Move Layer", "layer_visibility": "Show/Hide Layer"}
+
+    def _history_label(self, action) -> str:
+        if not action:
+            return ""
+        if action.get("type") == "batch":
+            first = action["actions"][0]
+            kind = self._LABELS.get(first.get("type"), "Change")
+            return f"{kind} ×{len(action['actions'])}" if kind != "Show/Hide Layer" else kind
+        return self._LABELS.get(action.get("type"), "Change")
 
     def _shift_top_level_items(self, dx: float, dy: float) -> None:
         """Move every top-level annotation by (dx, dy).
@@ -1806,13 +1929,65 @@ class EditorContainer(QGraphicsView):
                 item.setSelected(True)
         return pixmap
 
+    # Qt writer names for the extensions we may save.
+    _QT_FORMAT_NAMES = {"jpg": "JPEG", "jpeg": "JPEG", "png": "PNG", "bmp": "BMP", "webp": "WEBP"}
+    _LOSSY_FORMATS = {"jpg", "jpeg", "webp"}
+
+    def save_error(self) -> str:
+        """Why the last save failed ('' after a success or a cancelled dialog)."""
+        return self._last_save_error
+
     def _write_pixmap(self, filepath: str) -> bool:
-        """Render and write to *filepath*; False if Qt cannot write the format."""
+        """Render and write to *filepath*; False if the write failed (see :meth:`save_error`).
+
+        The image is written to a temporary file next to the target and then moved
+        over it, so a failed or interrupted save can never leave a half-written
+        (or emptied) screenshot behind.  Lossy formats use the quality chosen in
+        Configure ▸ Capture instead of Qt's lower default.
+        """
         ext = self._extension(filepath)
         if ext not in self._writable_formats():
+            self._last_save_error = f"This Qt build cannot write “.{ext or '?'}” files."
+            return False
+        directory = os.path.dirname(os.path.abspath(filepath))
+        if not os.path.isdir(directory):
+            try:
+                os.makedirs(directory, exist_ok=True)
+            except OSError as e:
+                self._last_save_error = f"Cannot create {directory}: {e.strerror or e}"
+                return False
+        if not os.access(directory, os.W_OK):
+            self._last_save_error = f"{directory} is not writable."
             return False
         background = QColor("#FFFFFF") if ext in self._OPAQUE_FORMATS else None
-        return self._render_to_pixmap(background).save(filepath)
+        pixmap = self._render_to_pixmap(background)
+        quality = -1
+        if ext in self._LOSSY_FORMATS:
+            try:
+                from crabture.capture import config as capture_config
+                quality = capture_config.quality()
+            except Exception:  # noqa: BLE001 - quality is a nicety, never a reason to fail
+                quality = -1
+        tmp = os.path.join(directory, f".{os.path.basename(filepath)}.{os.getpid()}.part")
+        try:
+            if not pixmap.save(tmp, self._QT_FORMAT_NAMES.get(ext, ext.upper()), quality):
+                self._last_save_error = f"Qt could not write the image to {directory} (disk full?)."
+                return False
+            try:
+                import shutil
+                shutil.copymode(filepath, tmp)          # keep the original file's permissions
+            except OSError:
+                pass
+            os.replace(tmp, filepath)
+        except OSError as e:
+            self._last_save_error = f"Cannot write {os.path.basename(filepath)}: {e.strerror or e}"
+            return False
+        finally:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        return True
 
     def _is_current_file(self, filepath: str) -> bool:
         return bool(self._current_filepath) and (
@@ -1820,8 +1995,12 @@ class EditorContainer(QGraphicsView):
         )
 
     def _save_to(self, filepath: str) -> bool:
+        self._last_save_error = ""
         ok = self._write_pixmap(filepath)
-        if ok and self._is_current_file(filepath):
+        if ok:
+            # The document now lives in the file it was just written to (Save As included),
+            # so it is clean and Save keeps writing there.
+            self._current_filepath = filepath
             self.mark_clean()
         return ok
 
@@ -1831,6 +2010,7 @@ class EditorContainer(QGraphicsView):
         If Qt cannot write the original's format (e.g. GIF) this falls back
         to "Save As" with a PNG suggestion instead of failing.
         """
+        self._last_save_error = ""
         if not self._current_filepath:
             return self.save_as()
         if self._extension(self._current_filepath) not in self._writable_formats():
@@ -1838,22 +2018,37 @@ class EditorContainer(QGraphicsView):
             return self._save_as_dialog(suggested)
         return self._save_to(self._current_filepath)
 
+    def _suggested_save_path(self) -> str:
+        """Where "Save As" starts: next to the open file, else in the screenshot folder."""
+        if self._current_filepath:
+            stem, ext = os.path.splitext(self._current_filepath)
+            ext = ext if ext.lstrip(".").lower() in self._writable_formats() else ".png"
+            return f"{stem}_edited{ext}"
+        from crabture.capture import config as capture_config
+        return os.path.join(capture_config.folder(), capture_config.render_name(capture_config.pattern()) + ".png")
+
     def save_as(self, filepath: str | None = None) -> bool:
+        self._last_save_error = ""
         if filepath is None:
-            return self._save_as_dialog(os.path.expanduser("~/Downloads/Crabshots/edited.png"))
+            return self._save_as_dialog(self._suggested_save_path())
         return self._save_to(filepath)
 
     def _save_as_dialog(self, suggested: str) -> bool:
-        filepath, _ = QFileDialog.getSaveFileName(
+        filters = ["PNG image (*.png)", "JPEG image (*.jpg *.jpeg)", "Bitmap (*.bmp)"]
+        if "webp" in self._writable_formats():
+            filters.append("WebP image (*.webp)")
+        filepath, chosen = QFileDialog.getSaveFileName(
             self,
             "Save Image As",
             suggested,
-            "Images (*.png *.jpg *.bmp *.webp)",
+            ";;".join(filters),
         )
         if not filepath:
             return False
         if not self._extension(filepath):
-            filepath += ".png"
+            # No extension typed: follow the filter picked in the dialog.
+            filepath += ".jpg" if "JPEG" in chosen else ".bmp" if "Bitmap" in chosen \
+                else ".webp" if "WebP" in chosen else ".png"
         return self._save_to(filepath)
 
     def copy_to_clipboard(self) -> None:
@@ -1867,14 +2062,21 @@ class EditorContainer(QGraphicsView):
     # =====================================================================
 
     def delete_layers(self, layer_ids) -> None:
-        """Delete whole layers (and their items) as undoable removals."""
-        for lid in layer_ids:
-            for item in self.layer_manager.get_items_for_layer(lid):
-                entry = self._detach_item(item)
-                self._record({"type": "remove_item", **entry})
-            # Empty layers have no items to record; just drop them.
+        """Delete whole layers (and their items): one undo step restores all of them."""
+        actions = []
+        for lid in dict.fromkeys(layer_ids):
+            info = self.layer_manager.layer_info(lid)
+            if info is None:
+                continue
+            items = list(self.layer_manager.get_items_for_layer(lid))
+            for item in items:
+                actions.append({"type": "remove_item", **self._detach_item(item)})
+            # An empty layer has no item to carry it: remember the layer itself.
             if self.layer_manager.layer_info(lid) is not None:
                 self.layer_manager.delete_layer(lid)
+                actions.append({"type": "layer_remove", "layer": lid, "layer_name": info[0],
+                                "layer_index": info[1], "layer_visible": info[2]})
+        self._record_group(actions)
         self.layers_changed.emit()
 
     def notify_file_renamed(self, old_path: str, new_path: str) -> None:
@@ -1883,12 +2085,13 @@ class EditorContainer(QGraphicsView):
             self._current_filepath = new_path
 
     def delete_selected(self) -> None:
+        actions = []
         for item in self._scene.selectedItems():
             if item is self._bg_pixmap_item:
                 continue
             # Children (e.g. a balloon's text) are removed with their parent.
             if item.parentItem() is not None:
                 continue
-            entry = self._detach_item(item)
-            self._record({"type": "remove_item", **entry})
+            actions.append({"type": "remove_item", **self._detach_item(item)})
+        self._record_group(actions)          # several items: still one Ctrl+Z
         self.layers_changed.emit()

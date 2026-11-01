@@ -10,7 +10,8 @@ import time
 from pathlib import Path
 from typing import Callable, List, Optional
 
-from PyQt6.QtCore import QDate, QDateTime, QFileSystemWatcher, QPoint, QRect, QSettings, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import (QDate, QDateTime, QFileSystemWatcher, QItemSelectionModel, QPoint, QRect, QSettings, QSize, Qt,
+                          QTimer, pyqtSignal)
 from PyQt6.QtGui import QAction, QActionGroup, QColor, QFont, QFontMetrics, QIcon, QPainter, QPen
 from PyQt6.QtWidgets import (
     QAbstractButton,
@@ -36,6 +37,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from crabture.settings import tool_config
 from crabture.ui import icons
 from crabture.ui import theme
 from crabture.editor.items import SpotlightItem
@@ -142,6 +144,8 @@ class PropertiesPanel(QWidget):
 
     # Emitted (via the event loop) with the height the visible sections need.
     content_height_changed = pyqtSignal(int)
+    # The user asked to configure a tool (id as in settings.tool_config.TOOL_LABELS).
+    configure_requested = pyqtSignal(str)
 
     def __init__(self, editor, parent=None) -> None:
         super().__init__(parent)
@@ -175,6 +179,10 @@ class PropertiesPanel(QWidget):
         head.addWidget(title)
         head.addStretch(1)
         head.addWidget(self._tool_badge)
+        # Opens Configure ▸ Tools on the active tool.
+        self._configure_btn = _icon_button("settings", "Configure this tool…", "toolbar", 16)
+        self._configure_btn.clicked.connect(lambda: self.configure_requested.emit(self._editor.active_tool()))
+        head.addWidget(self._configure_btn)
         lay.addLayout(head)
 
         # -- Colour card ---------------------------------------------------
@@ -209,6 +217,14 @@ class PropertiesPanel(QWidget):
 
         self._alpha, self._alpha_val = self._slider_row(cl, "Opacity", 0, 255, 255)
         self._alpha.valueChanged.connect(self._on_alpha)
+
+        # Thickness of the active line/shape tool; saved per tool, so it is kept between runs.
+        self._thickness_row = QWidget()
+        tk = QVBoxLayout(self._thickness_row)
+        tk.setContentsMargins(0, 0, 0, 0)
+        self._thickness, self._thickness_val = self._slider_row(tk, "Thickness", 1, 30, 3)
+        self._thickness.valueChanged.connect(self._on_thickness)
+        cl.addWidget(self._thickness_row)
         lay.addWidget(self.color_card)
 
         # -- Intensity card (blur / pixelate) ------------------------------
@@ -294,6 +310,17 @@ class PropertiesPanel(QWidget):
         self._editor.set_active_alpha(value)
         self._alpha_val.setText(f"{round(value * 100 / 255)}%")
 
+    # Tool -> the saved option that holds its line thickness.
+    THICKNESS_OPTION = {"arrow": "shaft_width", "line": "width", "pen": "width",
+                        "rectangle": "stroke_width", "ellipse": "stroke_width"}
+
+    def _on_thickness(self, value: int) -> None:
+        tool = self._editor.active_tool()
+        key = self.THICKNESS_OPTION.get(tool)
+        self._thickness_val.setText(f"{value} px")
+        if key:
+            tool_config.set(tool, key, value)
+
     def sync_color(self) -> None:
         """Mirror the editor's active colour/opacity into the chip, ring and slider."""
         color = self._editor.active_color()
@@ -338,6 +365,7 @@ class PropertiesPanel(QWidget):
         has_spot_item = any(isinstance(i, SpotlightItem) for i in selected)
 
         self._tool_badge.setText(TOOL_LABELS.get(tool, tool.title()))
+        self._configure_btn.setToolTip(f"Configure {TOOL_LABELS.get(tool, tool.title())}…")
         no_colour_tools = {"blur", "pixelate", "crop", "magnifier", "eyedropper", "hand"}
         show_colour = tool not in no_colour_tools or (bool(selected) and not has_intensity_item)
         self.color_card.setVisible(show_colour)
@@ -345,6 +373,16 @@ class PropertiesPanel(QWidget):
         self.spot_card.setVisible(tool == "spotlight" or has_spot_item)
         self.sticker_card.setVisible(tool == "sticker")
         self.step_card.setVisible(tool == "step")
+
+        thick_key = self.THICKNESS_OPTION.get(tool)
+        self._thickness_row.setVisible(thick_key is not None)
+        if thick_key:
+            opt = next(o for o in tool_config.TOOL_OPTIONS[tool] if o.key == thick_key)
+            self._thickness.blockSignals(True)
+            self._thickness.setRange(int(opt.min), int(opt.max))
+            self._thickness.setValue(int(tool_config.get(tool, thick_key)))
+            self._thickness.blockSignals(False)
+            self._thickness_val.setText(f"{self._thickness.value()} px")
 
         # Refresh values from the editor each time a section opens.
         for slider, label, value, fmt in (
@@ -387,7 +425,15 @@ class _LayerList(QListWidget):
     """List whose leading eye icon toggles visibility without selecting the row."""
 
     eye_clicked = pyqtSignal(str)
+    delete_requested = pyqtSignal()
     EYE_ZONE = 34
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) and self.selectedItems():
+            self.delete_requested.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
@@ -432,7 +478,9 @@ class LayersPanel(QWidget):
         self._list.setIconSize(QSize(18, 18))
         self._list.setFrameShape(QFrame.Shape.NoFrame)
         self._list.eye_clicked.connect(self._toggle_lid)
+        self._list.delete_requested.connect(self._del_layer)
         lay.addWidget(self._list, 1)
+        self._syncing = False             # True while selection is being mirrored (no feedback loops)
 
         self.btn_add.clicked.connect(self._add_layer)
         self.btn_del.clicked.connect(self._del_layer)
@@ -440,6 +488,9 @@ class LayersPanel(QWidget):
         self.btn_down.clicked.connect(self._move_down)
         self.btn_vis.clicked.connect(self._toggle_vis)
         self._editor.layers_changed.connect(self.refresh)
+        # Selecting a layer selects its annotations on the canvas, and the other way round.
+        self._list.itemSelectionChanged.connect(self._rows_to_canvas)
+        self._editor.scene().selectionChanged.connect(self._canvas_to_rows)
         theme.signals.changed.connect(lambda _n: self.refresh())
         self.refresh()
 
@@ -449,20 +500,74 @@ class LayersPanel(QWidget):
 
     def refresh(self) -> None:
         keep = set(self._selected_lids())
-        self._list.clear()
-        names = self._editor.layer_manager.layer_names()
-        t = theme.tokens()
-        for lid, name, visible in names:
-            item = QListWidgetItem(icons.icon("eye" if visible else "eye_off", 18), name)
-            item.setData(Qt.ItemDataRole.UserRole, lid)
-            item.setSizeHint(QSize(0, 34))
-            if not visible:
-                item.setForeground(QColor(t["text_muted"]))
-            self._list.addItem(item)
-            if lid in keep:
-                item.setSelected(True)
+        current = self._selected_lid()
+        self._syncing = True                 # rebuilding the rows must not touch the canvas selection
+        self._list.blockSignals(True)
+        try:
+            self._list.clear()
+            names = self._editor.layer_manager.layer_names()
+            t = theme.tokens()
+            for lid, name, visible in names:
+                item = QListWidgetItem(icons.icon("eye" if visible else "eye_off", 18), name)
+                item.setData(Qt.ItemDataRole.UserRole, lid)
+                item.setSizeHint(QSize(0, 34))
+                if not visible:
+                    item.setForeground(QColor(t["text_muted"]))
+                self._list.addItem(item)
+                if lid in keep:
+                    item.setSelected(True)
+                    if lid == current:
+                        self._list.setCurrentItem(item, QItemSelectionModel.SelectionFlag.NoUpdate)
+        finally:
+            self._list.blockSignals(False)
+            self._syncing = False
         n = len(names)
         self._count.setText(f"{n} layer{'s' if n != 1 else ''}")
+        self._canvas_to_rows()               # the canvas selection is the truth after any change
+
+    def _rows_to_canvas(self) -> None:
+        """Rows picked in the list → select those layers' annotations on the canvas."""
+        if self._syncing:
+            return
+        self._syncing = True
+        try:
+            scene = self._editor.scene()
+            scene.clearSelection()
+            for lid in self._selected_lids():
+                for item in self._editor.layer_manager.get_items_for_layer(lid):
+                    if item.isVisible() and (item.flags() & item.GraphicsItemFlag.ItemIsSelectable):
+                        item.setSelected(True)
+        finally:
+            self._syncing = False
+
+    def _canvas_to_rows(self) -> None:
+        """Annotations selected on the canvas → highlight their layers' rows."""
+        if self._syncing:
+            return
+        lm = self._editor.layer_manager
+        wanted = set()
+        for item in self._editor.scene().selectedItems():
+            top = item
+            while top.parentItem() is not None:
+                top = top.parentItem()
+            lid = lm.layer_id_of(top)
+            if lid:
+                wanted.add(lid)
+        # Keep rows of empty layers the user picked: they have nothing on the canvas to select.
+        for lid in self._selected_lids():
+            if lm.is_layer_empty(lid):
+                wanted.add(lid)
+        if wanted == set(self._selected_lids()):
+            return
+        self._syncing = True
+        self._list.blockSignals(True)
+        try:
+            for i in range(self._list.count()):
+                it = self._list.item(i)
+                it.setSelected(it.data(Qt.ItemDataRole.UserRole) in wanted)
+        finally:
+            self._list.blockSignals(False)
+            self._syncing = False
 
     def _selected_lid(self) -> Optional[str]:
         cur = self._list.currentItem()
@@ -472,9 +577,7 @@ class LayersPanel(QWidget):
         return [i.data(Qt.ItemDataRole.UserRole) for i in self._list.selectedItems()]
 
     def _add_layer(self) -> None:
-        idx = self._list.count() + 1
-        self._editor.layer_manager.add_layer(f"Layer {idx}")
-        self._editor.layers_changed.emit()
+        self._editor.add_layer()
 
     def _del_layer(self) -> None:
         lids = self._selected_lids()
@@ -482,25 +585,27 @@ class LayersPanel(QWidget):
             self._editor.delete_layers(lids)
 
     def _move_up(self) -> None:
-        lid = self._selected_lid()
-        if lid:
-            self._editor.layer_manager.move_layer_up(lid)
-            self._editor.layers_changed.emit()
+        self._move(True)
 
     def _move_down(self) -> None:
-        lid = self._selected_lid()
-        if lid:
-            self._editor.layer_manager.move_layer_down(lid)
-            self._editor.layers_changed.emit()
+        self._move(False)
+
+    def _move(self, up: bool) -> None:
+        lids = self._selected_lids()
+        if not lids:
+            return
+        # The panel lists top to bottom: step the topmost first when moving up (bottom first when down).
+        order = {lid: i for i, (lid, _n, _v) in enumerate(self._editor.layer_manager.layer_names())}
+        for lid in sorted(lids, key=lambda l: order.get(l, 0), reverse=not up):
+            self._editor.move_layer(lid, up)
 
     def _toggle_vis(self) -> None:
-        for lid in self._selected_lids() or ([self._selected_lid()] if self._selected_lid() else []):
-            self._editor.layer_manager.toggle_visibility(lid)
-        self._editor.layers_changed.emit()
+        lids = self._selected_lids()
+        if lids:
+            self._editor.toggle_layer_visibility(lids)
 
     def _toggle_lid(self, lid: str) -> None:
-        self._editor.layer_manager.toggle_visibility(lid)
-        self._editor.layers_changed.emit()
+        self._editor.toggle_layer_visibility([lid])
 
 
 # =========================================================================
@@ -774,6 +879,7 @@ class GalleryPanel(QWidget):
     """Folder gallery: filter box, sort menu, size slider, four view modes, watcher."""
 
     open_requested = pyqtSignal(str)
+    open_files_requested = pyqtSignal(list)       # several selected paths: open them as one session
     rename_requested = pyqtSignal(list)           # list of QListWidgetItem
     change_folder_requested = pyqtSignal()
     listing_changed = pyqtSignal(list)            # all image paths, newest first
@@ -782,6 +888,9 @@ class GalleryPanel(QWidget):
         super().__init__(parent)
         self._ext_getter = ext_getter
         self.directory: str = default_dir
+        # When set, the gallery lists exactly these files (a "session" of opened files)
+        # instead of everything in `directory`.
+        self._files: Optional[list[str]] = None
         self._thumb_size = 120
         self._is_list_view = True
         self._view_mode = "list"
@@ -915,18 +1024,40 @@ class GalleryPanel(QWidget):
     # -- public API --------------------------------------------------------
 
     def watch(self, directory: str) -> None:
+        """Show (and watch) every image in *directory*."""
+        self._files = None
         self.directory = directory
         Path(directory).mkdir(parents=True, exist_ok=True)
         short = directory.replace(str(Path.home()), "~")
         self._folder_label.setText(os.path.basename(directory.rstrip("/")) or directory)
         self._folder_label.setToolTip(short)
+        self._rewatch([directory])
+        self.refresh()
+
+    def show_files(self, paths: list[str]) -> None:
+        """Show only *paths* (one session of explicitly opened files)."""
+        files = [os.path.abspath(p) for p in paths if p]
+        if not files:
+            return
+        self._files = list(dict.fromkeys(files))             # no duplicates, keep order
+        folders = sorted({os.path.dirname(f) for f in self._files})
+        self.directory = folders[0]
+        n = len(self._files)
+        self._folder_label.setText(f"{n} selected file{'s' if n != 1 else ''}")
+        self._folder_label.setToolTip("\n".join(f.replace(str(Path.home()), "~") for f in folders))
+        self._rewatch(folders)
+        self.refresh()
+
+    def is_file_session(self) -> bool:
+        return self._files is not None
+
+    def _rewatch(self, directories: list[str]) -> None:
         if self._watcher is not None:
             self._watcher.removePaths(self._watcher.directories())
         else:
             self._watcher = QFileSystemWatcher(self)
             self._watcher.directoryChanged.connect(self.refresh)
-        self._watcher.addPath(directory)
-        self.refresh()
+        self._watcher.addPaths([d for d in directories if os.path.isdir(d)])
 
     def set_view(self, mode) -> None:
         """Switch view style: 'grid' | 'list' | 'details' | 'compact'.
@@ -1089,7 +1220,9 @@ class GalleryPanel(QWidget):
         entries: list[tuple[float, Path, int]] = []
         try:
             exts = self._ext_getter()
-            for path in Path(self.directory).iterdir():
+            candidates = ([Path(f) for f in self._files] if self._files is not None
+                          else Path(self.directory).iterdir())
+            for path in candidates:
                 if path.suffix.lower() not in exts:
                     continue
                 try:
@@ -1208,8 +1341,17 @@ class GalleryPanel(QWidget):
             return
         menu = QMenu(self.list)
         menu.setObjectName("context_menu")
-        act_open = menu.addAction(icons.icon("open", 16), "Open")
-        act_open.triggered.connect(lambda: self._on_click(items[0]))
+        if len(items) > 1:
+            # Open every selected file as one session: the gallery then lists only these.
+            act_open = menu.addAction(icons.icon("open", 16), f"Open {len(items)} selected files")
+            act_open.triggered.connect(
+                lambda: self.open_files_requested.emit([i.data(Qt.ItemDataRole.UserRole) for i in items]))
+        else:
+            act_open = menu.addAction(icons.icon("open", 16), "Open")
+            act_open.triggered.connect(lambda: self._on_click(items[0]))
+        if self._files is not None:
+            act_all = menu.addAction(icons.icon("folder", 16), "Show the whole folder")
+            act_all.triggered.connect(lambda: self.watch(self.directory))
         act_rename = menu.addAction(icons.icon("rename", 16), f"Power Rename {len(items)} item(s)…")
         act_rename.triggered.connect(lambda: self.rename_requested.emit(items))
         menu.addSeparator()
@@ -1223,9 +1365,8 @@ class GalleryPanel(QWidget):
     def reveal(items) -> None:
         if not items:
             return
-        import subprocess
-        path = items[0].data(Qt.ItemDataRole.UserRole)
-        subprocess.Popen(["xdg-open", os.path.dirname(path)])
+        from crabture import osinfo
+        osinfo.reveal_in_file_manager(items[0].data(Qt.ItemDataRole.UserRole))
 
     @staticmethod
     def copy_path(items) -> None:

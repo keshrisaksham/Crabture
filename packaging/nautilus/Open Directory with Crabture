@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Crabture — Nautilus script "Open Directory with Crabture".
+# Shows the selected folder (or the folder you are in) in Crabture's gallery.
+
+CRABTURE="$HOME/.local/bin/crabture"
+[ -x "$CRABTURE" ] || CRABTURE="$(command -v crabture || true)"
+if [ -z "$CRABTURE" ]; then
+    rm -f -- "$0" 2>/dev/null        # Crabture was uninstalled: remove this stale menu entry
+    exit 0
+fi
+
+SELECTED=$(echo "$NAUTILUS_SCRIPT_SELECTED_FILE_PATHS" | head -n 1 | tr -d '\r')
+if [ -z "$SELECTED" ]; then
+    SELECTED="$NAUTILUS_SCRIPT_CURRENT_URI"
+    SELECTED="${SELECTED#file://}"
+    SELECTED=$(python3 -c "import urllib.parse, sys; print(urllib.parse.unquote(sys.argv[1]))" "$SELECTED")
+fi
+if [ -d "$SELECTED" ]; then
+    TARGET="$SELECTED"
+elif [ -f "$SELECTED" ]; then
+    TARGET="$(dirname "$SELECTED")"
+else
+    TARGET="$HOME"
+fi
+exec "$CRABTURE" --directory "$TARGET"

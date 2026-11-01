@@ -150,7 +150,7 @@ class WelcomePage(QFrame):
         hint = QLabel("Take screenshots with a key press, from anywhere.")
         set_role(hint, "caption")
         hl.addWidget(hint)
-        self._setup_btn = QPushButton("Set up GNOME shortcuts")
+        self._setup_btn = QPushButton("Set up capture shortcuts")
         set_role(self._setup_btn, "ghost")
         self._setup_btn.clicked.connect(self.shortcuts_setup_requested.emit)
         hl.addWidget(self._setup_btn)

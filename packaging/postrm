@@ -10,6 +10,25 @@ if [ "$1" = "remove" ] || [ "$1" = "purge" ] || [ "$1" = "upgrade" ] || [ "$1" =
     fi
 fi
 
+# The right-click scripts: take back only the files that are ours.
+if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
+    remove_scripts() {
+        for name in "Edit with Crabture" "Open Directory with Crabture"; do
+            f="$1/$name"
+            if [ -f "$f" ] && grep -qs "Crabture — Nautilus script" "$f"; then
+                rm -f "$f"
+            fi
+        done
+    }
+    remove_scripts /etc/skel/.local/share/nautilus/scripts
+    if command -v getent >/dev/null 2>&1; then
+        getent passwd | while IFS=: read -r _name _pw uid _gid _gecos home _shell; do
+            [ "$uid" -ge 1000 ] 2>/dev/null && [ "$uid" -lt 60000 ] || continue
+            if [ -d "$home" ]; then remove_scripts "$home/.local/share/nautilus/scripts"; fi
+        done
+    fi
+fi
+
 # Python bytecode caches are not owned by the package; drop them on removal.
 if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
     find /usr/lib/crabture -depth -name __pycache__ -exec rm -rf {} + 2>/dev/null || true

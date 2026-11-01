@@ -3,12 +3,13 @@
 crabture \- screenshot capture, annotation and image management
 .SH SYNOPSIS
 .B crabture
-[\fIOPTIONS\fR] [\fIIMAGE\fR]
+[\fIOPTIONS\fR] [\fIIMAGE\fR...]
 .br
 .B crabture
 .B \-\-capture
 .I MODE
-[\fB\-\-delay\fR \fISECONDS\fR] [\fB\-\-no\-hide\fR]
+[\fB\-\-delay\fR \fISECONDS\fR] [\fB\-\-folder\fR \fIDIR\fR] [\fB\-\-after\fR \fIeditor\fR|\fIsave\fR]
+[\fB\-\-clipboard\fR] [\fB\-\-no\-hide\fR]
 .br
 .B crabture
 .B \-\-directory
@@ -20,13 +21,17 @@ capture the screen, annotate images with arrows, shapes, text, numbered
 steps, blur and pixelation, apply image effects, and browse and bulk-rename
 the images in a folder.
 .PP
-If
+If one
 .I IMAGE
-is given, it is opened in the editor on start-up.
+is given, it is opened in the editor on start-up and the gallery shows the
+folder it lives in (unless
+.B \-\-directory
+is also given). If several images are given they open as one session: the
+first is edited and the gallery lists just those files.
 .SH OPTIONS
 .TP
-.I IMAGE
-Image file to open on launch.
+.I IMAGE...
+Image file(s) to open on launch.
 .TP
 .BR \-d ", " \-\-directory " " \fIDIR\fR
 Populate the gallery with the images in
@@ -34,7 +39,9 @@ Populate the gallery with the images in
 (default: \fI~/Downloads/Crabshots\fR).
 .TP
 .BI \-\-capture " MODE"
-Take a screenshot on start-up and open it in the editor.
+Take a screenshot. If Crabture is already running the request is handed to that
+instance. By default the shot opens in the editor (see
+.BR \-\-after ).
 .I MODE
 is one of
 .BR region ,
@@ -49,14 +56,49 @@ Wait
 .I SECONDS
 before capturing.
 .TP
+.BI \-\-folder " DIR"
+Save the screenshot in
+.I DIR
+instead of the capture folder chosen in Configure.
+.TP
+.BI \-\-after " editor" | save
+.B editor
+opens the screenshot in Crabture,
+.B save
+only saves it and shows a desktop notification (no window is opened).
+Default: as chosen in Configure.
+.TP
+.B \-\-clipboard
+Also copy the screenshot to the clipboard.
+.TP
 .B \-\-no\-hide
 Do not hide the Crabture window while capturing.
 .TP
+.B \-\-install\-integration
+Add the "Edit with Crabture" and "Open Directory with Crabture" entries to
+Nautilus (right\-click, Scripts). The package does this automatically the first
+time Crabture starts.
+.TP
+.B \-\-remove\-integration
+Remove the entries added by
+.BR \-\-install\-integration .
+.TP
+.B \-\-install\-integration
+Add the "Edit with Crabture" and "Open Directory with Crabture" entries to
+Nautilus (right\-click, Scripts). The package does this automatically the first
+time Crabture starts.
+.TP
+.B \-\-remove\-integration
+Remove the entries added by
+.BR \-\-install\-integration .
+.TP
 .B \-\-register\-hotkeys
-Register Crabture capture shortcuts as GNOME custom keyboard shortcuts
-(requires
-.BR gsettings (1)).
-Existing shortcuts are not overwritten.
+Give the capture shortcuts saved in Configure \(en Capture to the desktop
+(GNOME custom keyboard shortcuts via
+.BR gsettings (1),
+or Xfce via
+.BR xfconf\-query (1)).
+Existing shortcuts are not overwritten; keys already in use are skipped.
 .TP
 .B \-\-unregister\-hotkeys
 Remove the shortcuts added by
@@ -73,7 +115,7 @@ Show a help message and exit.
 .SH FILES
 .TP
 .I ~/Downloads/Crabshots
-Default folder for captures and for the gallery.
+Default folder for captures and for the gallery (changeable in Configure \(en Capture).
 .SH ENVIRONMENT
 Crabture detects the session type (X11 or Wayland). On Wayland, screenshots
 are taken through the xdg-desktop-portal Screenshot interface; on X11 the Qt

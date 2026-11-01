@@ -21,9 +21,8 @@ from pathlib import Path
 from typing import Optional
 
 from PyQt6.QtCore import QSettings, QSize, Qt, QTimer, QUrl, pyqtSlot
-from PyQt6.QtGui import QAction, QActionGroup, QColor, QIcon, QKeySequence, QPixmap
+from PyQt6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QIcon, QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
-    QApplication,
     QFileDialog,
     QFrame,
     QGraphicsTextItem,
@@ -43,6 +42,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from crabture.capture import config as capture_config
 from crabture.ui import icons
 from crabture.settings import keymap
 from crabture.ui import theme
@@ -58,7 +58,8 @@ from crabture.ui.toolrail import ToolRail
 from crabture.ui.welcome import WelcomePage
 
 # Directory to watch.
-CRABSHOTS_DIR = os.path.expanduser("~/Downloads/Crabshots")
+# Default capture folder; the folder actually used is capture_config.folder() (Configure ▸ Capture).
+CRABSHOTS_DIR = capture_config.default_folder()
 SUPPORTED_EXTENSIONS = set(_DEFAULT_EXTENSIONS)
 
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.bmp *.webp *.gif *.tiff)"
@@ -69,6 +70,10 @@ class CrabtureMainWindow(QMainWindow):
     """Main application window for Crabture."""
 
     def __init__(self, initial_image: str | None = None, initial_directory: str | None = None) -> None:
+        # The gallery starts on the folder the user asked for (--directory), else on the folder of the
+        # file being opened, else on the screenshot folder.
+        if not initial_directory and initial_image:
+            initial_directory = os.path.dirname(os.path.abspath(initial_image))
         super().__init__()
         self._base_title = "Crabture"
         self.setWindowTitle(self._base_title)
@@ -77,14 +82,11 @@ class CrabtureMainWindow(QMainWindow):
         self.setMinimumSize(900, 600)
         self.setAcceptDrops(True)
 
-        # Screen capture state (CaptureService is created lazily).
-        self._capture = None
+        # Screen capture: the controller is shared with shortcuts / `--capture` (see app.py).
         self._capture_menu: Optional[QMenu] = None
-        self._quit_if_capture_ends = False   # launched via `crabture --capture`
+        self._capture_shortcuts: list[QShortcut] = []
+        self._last_capture_folder = capture_config.folder()
         qs = QSettings()
-        self._cap_delay = float(qs.value("capture/delay", 0.0) or 0.0)
-        self._cap_hide = str(qs.value("capture/hide", "true")).lower() != "false"
-        self._cap_clipboard = str(qs.value("capture/clipboard", "false")).lower() == "true"
         self._side_panel_wanted = str(qs.value("ui/side_panel", "true")).lower() != "false"
         self._watched_dir: str = CRABSHOTS_DIR
         self._settings_dlg = None            # single SettingsDialog instance (created lazily)
@@ -111,7 +113,7 @@ class CrabtureMainWindow(QMainWindow):
 
         # -- Gallery / watcher --------------------------------------------
         self._gallery = self._gallery_panel.list
-        start_dir = initial_directory if initial_directory else CRABSHOTS_DIR
+        start_dir = initial_directory if initial_directory else capture_config.folder()
         self.watch_directory(start_dir)
 
         self._set_page(False)
@@ -120,6 +122,8 @@ class CrabtureMainWindow(QMainWindow):
         self._update_image_chip()
         self._refresh_title()
         keymap.signals.changed.connect(self._apply_shortcuts)
+        capture_config.signals.changed.connect(self._reload_capture_settings)
+        self._rebuild_capture_shortcuts()
 
     # =====================================================================
     #  Actions (shared by toolbar and menus)
@@ -164,7 +168,7 @@ class CrabtureMainWindow(QMainWindow):
             self._tb_capture_act.setToolTip(self._tb_capture_tip())
 
     def _tb_capture_tip(self) -> str:
-        seq = keymap.get("action.capture_region")
+        seq = capture_config.shortcut_for_mode("region")
         return "Capture a region (arrow: other capture modes)" + (f" ({seq})" if seq else "")
 
     def _build_actions(self) -> None:
@@ -239,22 +243,27 @@ class CrabtureMainWindow(QMainWindow):
         self.act_cfg_tools = self._act("&Tool Settings…", "wand", None,
                                        lambda: self._open_settings("tools"),
                                        "Default colours, widths and sizes for each tool")
+        self.act_cfg_folder = self._act("Screenshot &Folder…", "folder", None,
+                                        lambda: self._open_settings("capture", focus_folder=True),
+                                        "Choose the folder screenshots are saved in")
 
-        # Capture actions
+        # Capture actions (their shortcuts come from Configure ▸ Capture, not from keymap)
         self.capture_actions: dict[str, QAction] = {}
+        self._capture_labels: dict[str, str] = {}
         for mode, label, icon_name, tip in (
             ("region", "&Region…", "capture_region", "Freeze the screen and drag a rectangle"),
             ("fullscreen", "&Fullscreen", "capture_fullscreen", "All monitors"),
             ("window", "Active &Window", "capture_window",
-             "X11: the focused window. Wayland: the system window picker"),
-            ("monitor", "&Monitor under cursor", "capture_monitor", "Only the monitor the pointer is on"),
+             "Windows / X11: the focused window. Wayland: the system window picker"),
+            ("monitor", "&Monitor…", "capture_monitor",
+             "One monitor: the one under the pointer, or click the one you want when there are several"),
             ("scroll", "&Scrolling capture…", "capture_scroll",
              "Select a region, then scroll the content; frames are stitched"),
         ):
             self.capture_actions[mode] = self._act(
-                label, icon_name, None, lambda m=mode: self.run_capture(m), tip,
-                key_id=f"action.capture_{mode}"
+                label, icon_name, None, lambda m=mode: self.run_capture(m), tip
             )
+            self._capture_labels[mode] = label
 
     # =====================================================================
     #  Layout
@@ -275,7 +284,7 @@ class CrabtureMainWindow(QMainWindow):
         # Side panel
         self._properties = PropertiesPanel(self._editor)
         self._layers_panel = LayersPanel(self._editor)
-        self._gallery_panel = GalleryPanel(lambda: SUPPORTED_EXTENSIONS, CRABSHOTS_DIR)
+        self._gallery_panel = GalleryPanel(lambda: SUPPORTED_EXTENSIONS, capture_config.folder())
         self._tabs = QTabWidget()
         self._tabs.setDocumentMode(True)
         self._tabs.addTab(self._layers_panel, "Layers")
@@ -448,7 +457,7 @@ class CrabtureMainWindow(QMainWindow):
 
         self._configure_menu = mb.addMenu("Con&figure")
         for a in (self.act_configure, None, self.act_cfg_shortcuts, self.act_cfg_tools,
-                  self.act_sensitive_configure):
+                  self.act_cfg_folder, self.act_sensitive_configure):
             self._configure_menu.addSeparator() if a is None else self._configure_menu.addAction(a)
 
         view_menu = mb.addMenu("&View")
@@ -535,20 +544,23 @@ class CrabtureMainWindow(QMainWindow):
         self._welcome.open_image_requested.connect(self._on_open)
         self._welcome.open_folder_requested.connect(self._on_open_folder)
         self._welcome.image_chosen.connect(self.load_image_to_editor)
-        self._welcome.shortcuts_setup_requested.connect(self._register_hotkeys)
+        self._welcome.shortcuts_setup_requested.connect(lambda: self._open_settings("capture"))
         # Rail / panels
         self._rail.sticker_reclicked.connect(lambda w: pick_sticker(self._editor, w))
         gp = self._gallery_panel
         gp.open_requested.connect(self.load_image_to_editor)
+        gp.open_files_requested.connect(self.open_files)
         gp.rename_requested.connect(self._trigger_power_rename)
         gp.change_folder_requested.connect(self._on_open_folder)
         gp.listing_changed.connect(self._on_listing_changed)
+        self._properties.configure_requested.connect(lambda tool: self._open_settings("tools", tool=tool))
         # Tool defaults / configuration changes refresh the Properties panel
         self._editor.tool_defaults_applied.connect(self._properties.refresh_from_editor)
         tool_config.signals.changed.connect(lambda _t: QTimer.singleShot(0, self._properties.refresh_from_editor))
         keymap.signals.changed.connect(lambda _i: self._properties.refresh_from_editor())
         # Editor
         self._editor.layers_changed.connect(self._update_image_chip)
+        self._editor.layers_changed.connect(self._update_history_actions)
         self._editor.modified_changed.connect(lambda _m: self._update_image_chip())
         self._editor.zoom_changed.connect(lambda _z: self._update_image_chip())
 
@@ -572,6 +584,15 @@ class CrabtureMainWindow(QMainWindow):
                   self.act_steps, self.act_zoom_in, self.act_zoom_out, self.act_fit, self.act_actual):
             a.setEnabled(has)
         self._zoom_slider.setEnabled(has)
+        self._update_history_actions()
+
+    def _update_history_actions(self) -> None:
+        """Undo / Redo: greyed out when there is nothing to step to, and named after what they would do."""
+        has = self._has_image()
+        for act, can, label, verb in ((self.act_undo, self._editor.can_undo(), self._editor.undo_label(), "Undo"),
+                                      (self.act_redo, self._editor.can_redo(), self._editor.redo_label(), "Redo")):
+            act.setEnabled(has and can)
+            act.setText(f"&{verb} {label}" if can and label else f"&{verb}")
 
     def _fit_properties(self, needed: int) -> None:
         if self._split_user_set:
@@ -661,8 +682,8 @@ class CrabtureMainWindow(QMainWindow):
     # =====================================================================
 
     def watch_directory(self, directory: str | None = None) -> None:
-        """Start monitoring *directory* (defaults to ~/Downloads/Crabshots) for new images."""
-        target = directory if directory else CRABSHOTS_DIR
+        """Start monitoring *directory* (defaults to the capture folder) for new images."""
+        target = directory if directory else capture_config.folder()
         self._watched_dir = target
         self._gallery_panel.watch(target)
         short = target.replace(str(Path.home()), "~")
@@ -678,10 +699,11 @@ class CrabtureMainWindow(QMainWindow):
 
     def _update_hotkey_hint(self) -> None:
         show = False
-        if str(QSettings().value("ui/hotkey_hint_done", "false")).lower() != "true":
+        if str(QSettings().value("ui/hotkey_hint_done", "false")).lower() != "true" \
+                and not capture_config.desktop_applied():
             try:
                 from crabture.capture import hotkeys
-                show = bool(hotkeys._is_gnome())
+                show = hotkeys.supported()
             except Exception:
                 show = False
         self._welcome.set_hotkey_hint_visible(show)
@@ -794,10 +816,10 @@ class CrabtureMainWindow(QMainWindow):
     #  Loading / closing images
     # =====================================================================
 
-    def load_image_to_editor(self, filepath: str) -> None:
-        """Load *filepath* into the EditorContainer."""
+    def load_image_to_editor(self, filepath: str) -> bool:
+        """Load *filepath* into the EditorContainer.  True if it is now the open image."""
         if not self._confirm_discard_changes():
-            return
+            return False
         ok = self._editor.load_image(filepath)
         if ok:
             self._set_page(True)
@@ -810,6 +832,38 @@ class CrabtureMainWindow(QMainWindow):
                 "Load Failed",
                 f"Could not open image:\n{filepath}\n\nThe file may be corrupted or unsupported.",
             )
+        return ok
+
+    def open_path(self, filepath: str) -> bool:
+        """Open a file chosen from *outside* the gallery (File ▸ Open, command line, drag and drop).
+
+        The gallery follows the file: it shows the folder the file came from.
+        """
+        if not self.load_image_to_editor(filepath):
+            return False
+        folder = os.path.dirname(os.path.abspath(filepath))
+        panel = self._gallery_panel
+        in_session = panel.is_file_session() and os.path.abspath(filepath) in panel._files
+        if not in_session and (panel.is_file_session() or os.path.abspath(self._watched_dir) != folder):
+            self.watch_directory(folder)
+        return True
+
+    def open_files(self, paths: list[str]) -> bool:
+        """Open several files as ONE session: the first is edited, and the gallery lists only these files."""
+        paths = [p for p in dict.fromkeys(os.path.abspath(p) for p in paths)
+                 if os.path.isfile(p) and Path(p).suffix.lower() in SUPPORTED_EXTENSIONS]
+        if not paths:
+            self.statusBar().showMessage("None of those files is a supported image.")
+            return False
+        if len(paths) == 1:
+            return self.open_path(paths[0])
+        if not self.load_image_to_editor(paths[0]):
+            return False
+        self._watched_dir = os.path.dirname(paths[0])
+        self._gallery_panel.show_files(paths)
+        self._tabs.setCurrentWidget(self._gallery_panel)
+        self.statusBar().showMessage(f"Opened {len(paths)} files")
+        return True
 
     def close_image(self) -> None:
         """Close the current image (asks about unsaved changes) and show the welcome page."""
@@ -838,10 +892,10 @@ class CrabtureMainWindow(QMainWindow):
                 self.watch_directory(path)
                 self._tabs.setCurrentWidget(self._gallery_panel)
                 return
-        for path in paths:
-            if Path(path).suffix.lower() in SUPPORTED_EXTENSIONS:
-                self.load_image_to_editor(path)
-                return
+        images = [p for p in paths if Path(p).suffix.lower() in SUPPORTED_EXTENSIONS]
+        if images:
+            self.open_files(images)
+            return
         if paths:
             self.statusBar().showMessage("Dropped file is not a supported image.")
 
@@ -850,32 +904,59 @@ class CrabtureMainWindow(QMainWindow):
     # =====================================================================
 
     def _on_open(self) -> None:
-        filepath, _ = QFileDialog.getOpenFileName(
-            self, "Open Image", os.path.expanduser("~/Downloads/Crabshots"), IMAGE_FILTER
+        filepaths, _ = QFileDialog.getOpenFileNames(
+            self, "Open Image", self._watched_dir, IMAGE_FILTER
         )
-        if filepath:
-            self.load_image_to_editor(filepath)
+        if filepaths:
+            self.open_files(filepaths)
 
     def _on_save(self) -> bool:
         """Save the current image.  Returns True only if it was written."""
         if self._editor.save_overwrite():
             self._editor.mark_clean()
-            self.statusBar().showMessage("Saved.")
+            self.statusBar().showMessage(f"Saved {os.path.basename(self._editor.current_filepath() or '')}.")
             self._refresh_gallery()
             self._update_image_chip()
             return True
         # False covers both a failed write and a cancelled Save As dialog.
+        return self._report_save_failure()
+
+    def _report_save_failure(self) -> bool:
+        """Tell the user why a save failed (nothing is said when they just cancelled the dialog).
+
+        Offers "Save As…" so the work is never stuck behind a read-only location.
+        Returns True only if that second attempt wrote a file.
+        """
+        reason = self._editor.save_error()
+        if not reason:
+            self.statusBar().showMessage("Not saved.")
+            return False
         self.statusBar().showMessage("Not saved.")
+        box = QMessageBox(QMessageBox.Icon.Warning, "Could not save", reason, parent=self)
+        save_as = box.addButton("Save As…", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        if box.clickedButton() is save_as and self._editor.save_as():
+            self.statusBar().showMessage("Saved.")
+            self._refresh_gallery()
+            self._update_image_chip()
+            return True
         return False
 
     def _on_save_as(self) -> None:
         if self._editor.save_as():
-            self.statusBar().showMessage("Saved successfully.")
+            self.statusBar().showMessage(f"Saved {os.path.basename(self._editor.current_filepath() or '')}.")
             self._refresh_gallery()
+            self._update_image_chip()
+        else:
+            self._report_save_failure()
 
     def _on_delete_selected(self) -> None:
         # Never delete the item whose text is being typed into.
         if isinstance(self._editor.scene().focusItem(), QGraphicsTextItem):
+            return
+        if self._layers_panel.list_widget.hasFocus() and self._layers_panel.list_widget.selectedItems():
+            self._layers_panel._del_layer()          # the user is working in the Layers list
             return
         self._editor.delete_selected()
 
@@ -892,7 +973,7 @@ class CrabtureMainWindow(QMainWindow):
         if self._capture_menu is not None:
             return self._capture_menu
         menu = QMenu("&Capture", self)
-        for mode in ("region", "fullscreen", "window", "monitor", "scroll"):
+        for mode in capture_config.CAPTURE_MODES:
             menu.addAction(self.capture_actions[mode])
 
         menu.addSeparator()
@@ -901,97 +982,114 @@ class CrabtureMainWindow(QMainWindow):
         group = QActionGroup(self)
         group.setExclusive(True)
         self._delay_actions: dict[int, QAction] = {}
-        for secs in (0, 1, 2, 3, 5, 10):
+        for secs in capture_config.DELAY_CHOICES:
             act = QAction("None" if secs == 0 else f"{secs} s", self, checkable=True)
             self._delay_actions[secs] = act
-            act.setChecked(abs(self._cap_delay - secs) < 1e-6)
-            act.triggered.connect(lambda _=False, v=secs: self._set_cap_delay(v))
+            act.triggered.connect(lambda _=False, v=secs: capture_config.set_delay(v))
             group.addAction(act)
             delay_menu.addAction(act)
 
         act_hide = QAction("&Hide Crabture while capturing", self, checkable=True)
-        act_hide.setChecked(self._cap_hide)
-        act_hide.toggled.connect(self._set_cap_hide)
+        act_hide.toggled.connect(capture_config.set_hide_window)
         self._act_hide = act_hide
         menu.addAction(act_hide)
 
         act_clip = QAction("Copy captures to &clipboard", self, checkable=True)
-        act_clip.setChecked(self._cap_clipboard)
-        act_clip.toggled.connect(self._set_cap_clipboard)
+        act_clip.toggled.connect(capture_config.set_clipboard)
         self._act_clip = act_clip
         menu.addAction(act_clip)
 
         menu.addSeparator()
+        act_folder = QAction("Open capture &folder", self)
+        icons.bind_icon(act_folder, "folder", 16)
+        act_folder.triggered.connect(self._open_capture_folder)
+        menu.addAction(act_folder)
+        act_cfg = QAction("Capture &settings and shortcuts…", self)
+        icons.bind_icon(act_cfg, "settings", 16)
+        act_cfg.triggered.connect(lambda: self._open_settings("capture"))
+        menu.addAction(act_cfg)
         act_info = QAction("Capture &backend…", self)
         icons.bind_icon(act_info, "info", 16)
         act_info.triggered.connect(self._show_capture_backend)
         menu.addAction(act_info)
-        act_reg = QAction("Register &GNOME shortcuts…", self)
-        icons.bind_icon(act_reg, "keyboard", 16)
-        act_reg.triggered.connect(self._register_hotkeys)
-        menu.addAction(act_reg)
-        act_unreg = QAction("&Remove GNOME shortcuts", self)
-        act_unreg.triggered.connect(self._unregister_hotkeys)
-        menu.addAction(act_unreg)
 
         self._capture_menu = menu
+        self._reload_capture_settings()
         return menu
 
     def _reload_capture_settings(self) -> None:
-        """Re-read the capture options (changed in the Configure window) from QSettings."""
-        qs = QSettings()
-        try:
-            self._cap_delay = float(qs.value("capture/delay", 0.0) or 0.0)
-        except (TypeError, ValueError):
-            self._cap_delay = 0.0
-        self._cap_hide = str(qs.value("capture/hide", "true")).lower() != "false"
-        self._cap_clipboard = str(qs.value("capture/clipboard", "false")).lower() == "true"
+        """Re-read the capture options (they may have changed in Configure ▸ Capture)."""
+        delay = capture_config.delay()
         for secs, act in getattr(self, "_delay_actions", {}).items():
-            act.setChecked(abs(self._cap_delay - secs) < 1e-6)
-        for act, value in ((getattr(self, "_act_hide", None), self._cap_hide),
-                           (getattr(self, "_act_clip", None), self._cap_clipboard)):
+            act.setChecked(abs(delay - secs) < 1e-6)
+        for act, value in ((getattr(self, "_act_hide", None), capture_config.hide_window()),
+                           (getattr(self, "_act_clip", None), capture_config.clipboard())):
             if act is not None:
                 act.blockSignals(True)
                 act.setChecked(value)
                 act.blockSignals(False)
+        # The gallery follows the capture folder when it was showing the old one.
+        folder = capture_config.folder()
+        if folder != self._last_capture_folder:
+            if (os.path.abspath(self._watched_dir) == os.path.abspath(self._last_capture_folder)
+                    and not self._gallery_panel.is_file_session()):
+                self.watch_directory(folder)
+            self._last_capture_folder = folder
+        self._rebuild_capture_shortcuts()
 
-    def _set_cap_delay(self, secs: float) -> None:
-        self._cap_delay = float(secs)
-        QSettings().setValue("capture/delay", self._cap_delay)
+    def _rebuild_capture_shortcuts(self) -> None:
+        """(Re)create the in-app capture shortcuts and show them in the menu."""
+        for sc in self._capture_shortcuts:
+            sc.setEnabled(False)
+            sc.setParent(None)
+            sc.deleteLater()
+        self._capture_shortcuts = []
+        used: set[str] = set()
+        for item in capture_config.shortcuts():
+            if not item.key:
+                continue
+            seq = QKeySequence(item.key, QKeySequence.SequenceFormat.PortableText)
+            norm = seq.toString()
+            if seq.isEmpty() or norm in used or self._keymap_uses(norm):
+                continue                                  # never create an ambiguous shortcut
+            used.add(norm)
+            sc = QShortcut(seq, self)
+            sc.activated.connect(lambda it=item: self.run_capture_shortcut(it))
+            self._capture_shortcuts.append(sc)
+        for mode, act in self.capture_actions.items():
+            key = capture_config.shortcut_for_mode(mode)
+            label = self._capture_labels.get(mode, act.text())
+            act.setText(f"{label}\t{QKeySequence(key, QKeySequence.SequenceFormat.PortableText).toString(QKeySequence.SequenceFormat.NativeText)}"
+                        if key else label)
+        if hasattr(self, "_tb_capture_act"):
+            self._tb_capture_act.setToolTip(self._tb_capture_tip())
+            self._tb_capture.setToolTip(self._tb_capture_tip())
 
-    def _set_cap_hide(self, on: bool) -> None:
-        self._cap_hide = bool(on)
-        QSettings().setValue("capture/hide", "true" if on else "false")
+    @staticmethod
+    def _keymap_uses(norm_sequence: str) -> bool:
+        return any(QKeySequence(text).toString() == norm_sequence
+                   for _d, text in keymap.all() if text)
 
-    def _set_cap_clipboard(self, on: bool) -> None:
-        self._cap_clipboard = bool(on)
-        QSettings().setValue("capture/clipboard", "true" if on else "false")
+    def run_capture_shortcut(self, item) -> None:
+        self._submit_capture(capture_config.request_for(item, "shortcut"))
 
-    def _ensure_capture_service(self):
-        if self._capture is None:
-            from crabture.capture.service import CaptureService
-            self._capture = CaptureService(self)
-            self._capture.captured.connect(self._on_captured)
-            self._capture.failed.connect(self._on_capture_failed)
-            self._capture.cancelled.connect(self._on_capture_cancelled)
-        return self._capture
+    def _open_capture_folder(self) -> None:
+        folder = capture_config.writable_folder(capture_config.folder())[0]
+        QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
 
     def run_capture(self, mode: str, delay: float | None = None, hide: bool | None = None,
                     quit_on_cancel: bool = False) -> None:
-        """Start a screen capture.  Called from the menu and from ``--capture``.
+        """Start a screen capture from the menu, toolbar or welcome page.
 
-        *quit_on_cancel* is used for command-line launches: if the capture is
-        cancelled or fails, the (never shown) window closes instead of
-        leaving an empty editor behind.
+        ``None`` for *delay* / *hide* means the saved defaults.  (*quit_on_cancel* is
+        accepted for older callers; the application object handles that now.)
         """
-        svc = self._ensure_capture_service()
-        if svc.is_busy():
+        self._submit_capture(capture_config.CaptureRequest(mode=mode, delay=delay, hide=hide, source="menu"))
+
+    def _submit_capture(self, request) -> None:
+        from crabture.capture.controller import shared
+        if not shared().request(request):
             self.statusBar().showMessage("A capture is already in progress.")
-            return
-        delay_s = self._cap_delay if delay is None else max(0.0, float(delay))
-        hide_it = self._cap_hide if hide is None else bool(hide)
-        self._quit_if_capture_ends = quit_on_cancel
-        svc.capture(mode, int(delay_s * 1000), hide_window=self if hide_it else None)
 
     def _present(self) -> None:
         if self.isFullScreen():
@@ -1001,33 +1099,24 @@ class CrabtureMainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
 
-    def _on_captured(self, pixmap, mode: str) -> None:
-        from crabture.capture.service import save_capture
-        self._quit_if_capture_ends = False
-        path = save_capture(pixmap, CRABSHOTS_DIR)
-        if self._cap_clipboard:
-            clip = QApplication.clipboard()
-            if clip:
-                clip.setPixmap(pixmap)
-        self._present()
-        if not path:
-            QMessageBox.warning(self, "Capture", "The capture succeeded but could not be saved to disk.")
-            return
-        self.load_image_to_editor(path)
+    def show_capture_result(self, result) -> None:
+        """A capture finished (called by the application object)."""
+        name = os.path.basename(result.path)
+        extra = f" — {result.note}" if result.note else ""
+        if result.request.after == "editor":
+            self._present()
+            self.load_image_to_editor(result.path)
+            self.statusBar().showMessage(f"Captured ({result.request.mode}): {name}{extra}")
+        else:
+            where = os.path.dirname(result.path).replace(str(Path.home()), "~")
+            self.statusBar().showMessage(f"Saved {name} in {where}{extra}")
         self._refresh_gallery()
-        self.statusBar().showMessage(f"Captured ({mode}): {os.path.basename(path)}")
 
-    def _on_capture_cancelled(self) -> None:
-        quit_now, self._quit_if_capture_ends = self._quit_if_capture_ends, False
-        self.statusBar().showMessage("Capture cancelled.")
-        if quit_now and not self.isVisible():
-            QApplication.quit()
-
-    def _on_capture_failed(self, message: str) -> None:
-        quit_now, self._quit_if_capture_ends = self._quit_if_capture_ends, False
+    def show_capture_failure(self, message: str) -> None:
         QMessageBox.warning(self if self.isVisible() else None, "Capture failed", message)
-        if quit_now and not self.isVisible():
-            QApplication.quit()
+
+    def show_capture_cancelled(self) -> None:
+        self.statusBar().showMessage("Capture cancelled.")
 
     def _show_capture_backend(self) -> None:
         try:
@@ -1036,26 +1125,6 @@ class CrabtureMainWindow(QMainWindow):
         except Exception as e:  # pragma: no cover - defensive
             info = f"unknown ({e})"
         QMessageBox.information(self, "Capture backend", info)
-
-    def _register_hotkeys(self) -> None:
-        if QMessageBox.question(
-            self,
-            "Register GNOME shortcuts",
-            "Add these GNOME keyboard shortcuts?\n\n"
-            "  Ctrl+Print            fullscreen capture\n"
-            "  Ctrl+Shift+Print      region capture\n"
-            "  Ctrl+Alt+Print        window capture\n\n"
-            "Existing shortcuts are never changed; any that is already taken is skipped.",
-        ) != QMessageBox.StandardButton.Yes:
-            return
-        from crabture.capture import hotkeys
-        QMessageBox.information(self, "GNOME shortcuts", "\n".join(hotkeys.register_gnome_shortcuts()))
-        QSettings().setValue("ui/hotkey_hint_done", "true")
-        self._welcome.set_hotkey_hint_visible(False)
-
-    def _unregister_hotkeys(self) -> None:
-        from crabture.capture import hotkeys
-        QMessageBox.information(self, "GNOME shortcuts", "\n".join(hotkeys.unregister_gnome_shortcuts()))
 
     # =====================================================================
     #  Effects / sensitive-data scan
@@ -1103,8 +1172,12 @@ class CrabtureMainWindow(QMainWindow):
     #  Configure window
     # =====================================================================
 
-    def _open_settings(self, tab: str | None = None) -> None:
-        """Show the (single, non-modal) Configure window, optionally on *tab*."""
+    def _open_settings(self, tab: str | None = None, tool: str | None = None,
+                       focus_folder: bool = False) -> None:
+        """Show the (single, non-modal) Configure window, optionally on *tab*.
+
+        *tool* selects that tool on the Tools tab; *focus_folder* puts the cursor in the
+        screenshot-folder field of the Capture tab."""
         dlg = self._settings_dlg
         if dlg is not None and tab is not None:
             switch = next((getattr(dlg, n) for n in ("show_tab", "set_tab", "select_tab", "set_current_tab")
@@ -1116,14 +1189,14 @@ class CrabtureMainWindow(QMainWindow):
                 dlg.deleteLater()
                 dlg = self._settings_dlg = None
         if dlg is None:
-            from crabture.settings.dialog import SettingsDialog, settings_signals
+            from crabture.settings.dialog import SettingsDialog
             dlg = SettingsDialog(self, initial_tab=tab)
             self._settings_dlg = dlg
-            try:
-                settings_signals.capture_changed.connect(self._reload_capture_settings)
-            except Exception:
-                pass
             dlg.destroyed.connect(lambda *_: setattr(self, "_settings_dlg", None))
+        if tool and hasattr(dlg, "show_tool"):
+            dlg.show_tool(tool)
+        if focus_folder and hasattr(dlg, "focus_capture_folder"):
+            dlg.focus_capture_folder()
         dlg.show()
         dlg.raise_()
         dlg.activateWindow()

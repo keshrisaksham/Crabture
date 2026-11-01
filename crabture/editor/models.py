@@ -53,6 +53,12 @@ class ActionHistory:
         self._undo_stack.append(action)
         return action
 
+    def peek_undo(self) -> Optional[Dict[str, Any]]:
+        return self._undo_stack[-1] if self._undo_stack else None
+
+    def peek_redo(self) -> Optional[Dict[str, Any]]:
+        return self._redo_stack[-1] if self._redo_stack else None
+
     def can_undo(self) -> bool:
         return bool(self._undo_stack)
 
