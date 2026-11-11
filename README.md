@@ -1,4 +1,4 @@
-# 🦀 Crabture — Yet Another Screenshot Tool (But Make It Crab)
+# 🦀 Crabture — Yet Another Screenshot Tool (But WAY BETTER!)
 
 **Crabture** is a ShareX-style screenshot tool for Debian, Kali and other Linux desktops. Yes, there are already a hundred of these. No, none of them were *this* crab-themed.
 
