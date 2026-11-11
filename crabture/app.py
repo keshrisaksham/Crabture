@@ -11,6 +11,7 @@ re-exported here for backwards compatibility.
 Capture flags (see capture/):
     crabture --capture region|fullscreen|window|monitor|scroll
              [--delay S] [--folder DIR] [--after editor|save] [--clipboard] [--no-hide]
+             [--output FILE|DIR] [--name NAME] [--copy-to DIR ...] [--print-path]
     crabture --register-hotkeys | --unregister-hotkeys   (desktop shortcuts, from Configure ▸ Capture)
     crabture --background                                (Windows: tray icon + global capture hot-keys)
     crabture --install-integration | --remove-integration (right-click entries in the file manager)
@@ -19,6 +20,10 @@ Capture flags (see capture/):
 
 If Crabture is already running, ``--capture`` is handed to that instance (ipc.py).
 Otherwise a capture that only saves the shot runs without opening any window.
+
+Terminal use: ``--output`` / ``--print-path`` make the command a self-contained one-shot.  It is not
+handed to a running instance, prints the saved path(s) on stdout, shows no notification and exits
+with 0 (saved), 1 (failed) or 2 (cancelled).
 """
 
 from __future__ import annotations
@@ -40,6 +45,9 @@ from crabture.resources import get_resource
 from crabture.ui.theme import apply_theme, initial_theme
 
 __all__ = ["main", "build_parser", "get_resource", "apply_theme"]
+
+# A terminal capture waits at most this long for other terminal captures ahead of it.
+CAPTURE_QUEUE_SECONDS = 180
 
 # A background instance that only saves shots goes away after this long without work.
 IDLE_QUIT_MS = 15 * 60 * 1000
@@ -111,6 +119,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="Also copy the screenshot to the clipboard.",
     )
     cap.add_argument(
+        "--output", "-o",
+        default=None,
+        metavar="PATH",
+        help="Save the screenshot to exactly this file (.png .jpg .webp .bmp; no suffix = the saved format), "
+             "or into this folder if PATH is a directory / ends in a slash. Implies --print-path.",
+    )
+    cap.add_argument(
+        "--name", "-n",
+        default=None,
+        metavar="NAME",
+        help="File name for this screenshot, without a folder (strftime codes like %%Y-%%m-%%d and {mode} work; "
+             "a .png/.jpg/.webp/.bmp ending also picks the format). Use with --folder or --output DIR.",
+    )
+    cap.add_argument(
+        "--copy-to",
+        action="append",
+        default=[],
+        metavar="DIR",
+        help="Also save a copy in DIR (repeat for several folders; added to the folders saved in Configure).",
+    )
+    cap.add_argument(
+        "--print-path", "-p",
+        action="store_true",
+        help="Wait for the capture, print the path(s) of the saved file(s) on stdout and exit with "
+             "0 (saved), 1 (failed) or 2 (cancelled). Defaults --after to 'save'. For scripts and the terminal.",
+    )
+    cap.add_argument(
         "--no-hide",
         action="store_true",
         help="Do not hide the Crabture window while capturing.",
@@ -155,17 +190,40 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def is_oneshot(args) -> bool:
+    """A terminal capture: wait for the result, print the path, exit."""
+    return bool(args.capture and (args.output or args.print_path))
+
+
 def request_from_args(args) -> Optional[CaptureRequest]:
+    """Build the request for ``--capture``.  Raises ``ValueError`` for an unusable ``--output``."""
     if not args.capture:
         return None
+    folder, output = args.folder, None
+    if args.output:
+        out_folder, output, error = capture_config.resolve_output(args.output)
+        if error:
+            raise ValueError(f"--output: {error}")
+        folder = out_folder or folder
+    if args.name:
+        if "/" in args.name or "\\" in args.name:
+            raise ValueError("--name: give only a file name; use --folder or --output DIR for the folder")
+        if output:
+            raise ValueError("--name cannot be combined with --output FILE (the file name is already in it); "
+                             "use --output DIR/ or --folder with --name")
+    oneshot = is_oneshot(args)
     return CaptureRequest(
         mode=args.capture,
         delay=None if args.delay is None else max(0.0, args.delay),
-        folder=args.folder,
-        after=args.after,
+        folder=folder,
+        after=args.after or ("save" if oneshot else None),
         hide=False if args.no_hide else None,
         clipboard=True if args.clipboard else None,
         source="cli",
+        output=output,
+        name=args.name or None,
+        copies=list(args.copy_to or []) or None,
+        quiet=oneshot,
     )
 
 
@@ -175,7 +233,8 @@ class _Host(QObject):
     Shortcuts that only save the shot never create the window at all.
     """
 
-    def __init__(self, app: QApplication, args, request: Optional[CaptureRequest], startup_lock=None) -> None:
+    def __init__(self, app: QApplication, args, request: Optional[CaptureRequest], startup_lock=None,
+                 capture_lock=None) -> None:
         super().__init__(app)
         from crabture import ipc
         from crabture.capture import controller
@@ -184,9 +243,11 @@ class _Host(QObject):
         self._args = args
         self.window = None
         self._exit_code = 0
+        self._oneshot = bool(request is not None and request.quiet)   # terminal capture: print, then exit
         self._clip_conn = False
         self._clip_owned = False         # we put a screenshot on the clipboard and still own it
         self.startup_lock = startup_lock
+        self.capture_lock = capture_lock         # held by a terminal one-shot until its capture ends
         self._opened: list = []          # files of the current "open" session
         self._opened_at = time.monotonic()
         self._idle = QTimer(self)
@@ -313,12 +374,37 @@ class _Host(QObject):
 
     # -- results -----------------------------------------------------------
 
+    def _print_result(self, result) -> None:
+        """Terminal one-shot: the saved path(s) go to stdout (one per line), notes to stderr."""
+        try:
+            print(result.path)
+            for extra in result.copies:
+                print(extra)
+            sys.stdout.flush()
+            if result.note:
+                print(f"crabture: {result.note}", file=sys.stderr)
+        except (OSError, ValueError):                 # closed pipe: the file is saved anyway
+            pass
+
+    def _release_capture_lock(self) -> None:
+        if self.capture_lock is not None:
+            self.capture_lock.release()
+
     def _on_finished(self, result) -> None:
+        self._release_capture_lock()
+        if self._oneshot:
+            self._print_result(result)
         if self.window is None and result.request.after == "editor":
             self.ensure_window(show=False)
         if self.window is not None:
             self.window.show_capture_result(result)
             return
+        if self._oneshot and not result.request.clipboard:
+            self._app.exit(self._exit_code)           # nothing left to wait for
+            return
+        if self._oneshot:
+            print("crabture: staying alive so the clipboard keeps the image "
+                  "(until something else is copied; Ctrl+C to stop).", file=sys.stderr)
         # Background mode: the notification is the only feedback.
         note = result.notification
         if note is not None:
@@ -356,6 +442,7 @@ class _Host(QObject):
             self._idle.start(IDLE_QUIT_MS)
 
     def _on_failed(self, message: str, request) -> None:
+        self._release_capture_lock()
         if self.window is not None:
             self.window.show_capture_failure(message)
             if not self.window.isVisible() and not self._resident:   # launched only for this capture
@@ -363,16 +450,51 @@ class _Host(QObject):
             return
         print(f"crabture: {message}", file=sys.stderr)
         self._exit_code = 1
+        if self._oneshot:
+            self._app.exit(1)
+            return
         from crabture.capture.notify import notify
         notify("Screenshot failed", message, parent=self, on_done=lambda _ok: self._idle.start(300))
 
     def _on_cancelled(self, request) -> None:
+        self._release_capture_lock()
         if self.window is not None:
             self.window.show_capture_cancelled()
             if not self.window.isVisible() and not self._resident:   # launched only for this capture
                 self._app.quit()
+        elif self._oneshot:
+            print("crabture: capture cancelled.", file=sys.stderr)
+            self._app.exit(2)
         else:
             self._idle.start(300)
+
+
+def _exit_cleanly_on_signals(app: QApplication, host: "_Host") -> None:
+    """Terminal one-shot: Ctrl+C / ``kill`` ends the capture quietly (status 128+signal).
+
+    Without this, Ctrl+C raises KeyboardInterrupt inside a Qt callback and PyQt aborts the process
+    (traceback, core dump, status -6) with the capture lock still held.  The timer only exists so the
+    interpreter gets control often enough to notice the signal while Qt waits for events.
+    """
+    import signal
+
+    def handler(signum, _frame) -> None:
+        host._release_capture_lock()
+        app.exit(128 + int(signum))
+
+    for name in ("SIGINT", "SIGTERM"):
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            if name == "SIGINT" and signal.getsignal(sig) == signal.SIG_IGN:
+                continue                          # started with Ctrl+C ignored (nohup, a background job): keep that
+            signal.signal(sig, handler)
+        except (ValueError, OSError):
+            pass
+    tick = QTimer(host)
+    tick.timeout.connect(lambda: None)
+    tick.start(200)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -408,9 +530,20 @@ def main(argv: list[str] | None = None) -> None:
         if ipc.send_command({"cmd": "ping"}):
             sys.exit(0)                     # a Crabture is already serving the shortcuts
 
-    request = request_from_args(args)
-    if request is not None:
+    if (args.output or args.print_path or args.copy_to or args.name) and not args.capture:
+        parser.error("--output, --name, --print-path and --copy-to need --capture MODE")
+    try:
+        request = request_from_args(args)
+    except ValueError as e:
+        parser.error(str(e))
+    if request is not None and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+                                    or osinfo.IS_WINDOWS or sys.platform == "darwin"):
+        print("crabture: taking a screenshot needs a graphical session "
+              "(DISPLAY / WAYLAND_DISPLAY is not set).", file=sys.stderr)
+        sys.exit(1)
+    if request is not None and not request.quiet:
         # A running Crabture takes the job: instant, and no second window.
+        # (A terminal one-shot --output / --print-path never does: it must report its own result.)
         from crabture import ipc
         if ipc.send_command({"cmd": "capture", "request": request.to_dict()}):
             sys.exit(0)
@@ -440,6 +573,16 @@ def main(argv: list[str] | None = None) -> None:
             if ipc.send_command(command):
                 sys.exit(0)
 
+    capture_lock = None
+    if request is not None and request.quiet:
+        # Terminal captures take turns (the desktop can only serve one screenshot at a time).
+        from crabture import ipc
+        capture_lock = ipc.CaptureLock()
+        if not capture_lock.acquire(CAPTURE_QUEUE_SECONDS):
+            print(f"crabture: another screenshot is still in progress (waited {CAPTURE_QUEUE_SECONDS}s).",
+                  file=sys.stderr)
+            sys.exit(1)
+
     osinfo.set_app_user_model_id("YawnByte.Crabture")      # Windows: our icon on the taskbar / in toasts
     app = QApplication(sys.argv)
     app.setApplicationName("Crabture")
@@ -452,7 +595,9 @@ def main(argv: list[str] | None = None) -> None:
     from crabture import integration
     integration.ensure_first_run()         # packaged install: add the right-click entries once
 
-    host = _Host(app, args, request, startup_lock)       # noqa: F841 - parented to the application
+    host = _Host(app, args, request, startup_lock, capture_lock)       # noqa: F841 - parented to the application
+    if host._oneshot:
+        _exit_cleanly_on_signals(app, host)
     sys.exit(app.exec())
 
 

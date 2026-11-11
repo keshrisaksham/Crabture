@@ -3,7 +3,7 @@ settings/capture_page.py — "Capture" tab of the Configure window.
 
 Three cards, all applied live (like the rest of the dialog):
 
-  • Where screenshots go   – folder, file-name pattern, image format
+  • Where screenshots go   – folder, extra folders for copies, file-name pattern, image format
   • After a capture        – open in the editor or just save, delay, clipboard, …
   • Capture shortcuts      – any number of key combinations, each taking one kind of
                              screenshot (optionally with its own delay / folder /
@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
     QMessageBox,
     QPlainTextEdit,
     QScrollArea,
@@ -269,6 +270,24 @@ class CapturePage(QWidget):
         self.folder_note.setWordWrap(True)
         lay.addWidget(self.folder_note)
 
+        crow = QHBoxLayout()
+        crow.setSpacing(8)
+        crow.addWidget(QLabel("Also save a copy to"))
+        crow.addStretch(1)
+        b = _button("Add folder…", "secondary", "folder", "Every capture is also copied into this folder")
+        b.clicked.connect(self._add_copy_folder)
+        crow.addWidget(b)
+        self.copy_remove = _button("Remove", "ghost", tip="Stop copying captures to the selected folder")
+        self.copy_remove.clicked.connect(self._remove_copy_folder)
+        crow.addWidget(self.copy_remove)
+        lay.addLayout(crow)
+        self.copies = QListWidget()
+        self.copies.setFixedHeight(64)
+        self.copies.setToolTip("Every capture is saved in the folder above and copied into each of these.\n"
+                               "A folder that cannot be written to is skipped and mentioned in the notification.")
+        self.copies.itemSelectionChanged.connect(lambda: self.copy_remove.setEnabled(bool(self.copies.selectedItems())))
+        lay.addWidget(self.copies)
+
         nrow = QHBoxLayout()
         nrow.setSpacing(8)
         nrow.addWidget(QLabel("File name"))
@@ -411,6 +430,9 @@ class CapturePage(QWidget):
         """Re-read everything stored into the controls (writes nothing)."""
         was, self._loading = self._loading, True
         self.folder.setText("" if config.folder_is_default() else config.folder())
+        self.copies.clear()
+        self.copies.addItems(config.extra_folders())
+        self.copy_remove.setEnabled(False)
         self.pattern.setText("" if config.pattern() == config.DEFAULT_PATTERN else config.pattern())
         self.format.setCurrentIndex(max(0, self.format.findData(config.image_format())))
         self.quality.setValue(config.quality())
@@ -514,6 +536,24 @@ class CapturePage(QWidget):
         if path:
             self.folder.setText(path)
             self._on_folder_edit()
+
+    def _add_copy_folder(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "Also save a copy in…", config.folder())
+        if not path:
+            return
+        folders = config.extra_folders()
+        full = config.expand(path)
+        if full not in folders:
+            self._apply(config.set_extra_folders, folders + [full])
+            self.copies.addItem(full)
+
+    def _remove_copy_folder(self) -> None:
+        gone = {i.text() for i in self.copies.selectedItems()}
+        if not gone:
+            return
+        self._apply(config.set_extra_folders, [f for f in config.extra_folders() if f not in gone])
+        for item in self.copies.selectedItems():
+            self.copies.takeItem(self.copies.row(item))
 
     def _reset_folder(self) -> None:
         self.folder.setText("")

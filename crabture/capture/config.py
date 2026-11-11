@@ -5,6 +5,7 @@ Everything the capture feature remembers lives here, stored with
 QSettings('YawnByte', 'Crabture') under the group ``capture``:
 
     capture/folder          where screenshots are saved
+    capture/copies          JSON list of extra folders every capture is also copied to
     capture/pattern         file-name pattern (strftime codes + ``{mode}``)
     capture/format          png | jpg | webp
     capture/quality         JPEG / WebP quality (1–100)
@@ -31,6 +32,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import tempfile
 import uuid
 from dataclasses import asdict, dataclass
@@ -153,6 +155,30 @@ def folder_is_default() -> bool:
     return folder() == default_folder()
 
 
+def extra_folders() -> List[str]:
+    """Folders every capture is *also* copied to (absolute, no duplicates, order kept)."""
+    try:
+        data = json.loads(str(_get("copies", "[]") or "[]"))
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return _unique_folders(str(d) for d in data if str(d).strip())
+
+
+def set_extra_folders(paths) -> None:
+    _put("copies", json.dumps(_unique_folders(str(p) for p in paths if str(p).strip()), ensure_ascii=False))
+
+
+def _unique_folders(paths) -> List[str]:
+    out: List[str] = []
+    for p in paths:
+        full = expand(p.strip())
+        if full not in out:
+            out.append(full)
+    return out
+
+
 def pattern() -> str:
     raw = str(_get("pattern", "") or "").strip()
     return raw or DEFAULT_PATTERN
@@ -245,7 +271,7 @@ def set_confirm_mode(mode: str) -> None:
     _put("confirm", mode if mode in ("button", "release") else "button")
 
 
-PREFERENCE_KEYS = ("folder", "pattern", "format", "quality", "after", "engine", "delay", "hide",
+PREFERENCE_KEYS = ("folder", "copies", "pattern", "format", "quality", "after", "engine", "delay", "hide",
                    "clipboard", "notify", "confirm")
 
 
@@ -404,6 +430,10 @@ class CaptureRequest:
     hide: Optional[bool] = None
     clipboard: Optional[bool] = None
     source: str = "menu"              # menu | shortcut | cli | ipc
+    output: Optional[str] = None      # exact file to write (overrides folder + name pattern)
+    name: Optional[str] = None        # file name for THIS capture (strftime codes and {mode}; optional suffix)
+    copies: Optional[List[str]] = None  # extra folders for THIS capture (added to the saved ones)
+    quiet: bool = False               # terminal one-shot: no desktop notification
 
     def resolved(self) -> "CaptureRequest":
         """A copy with every ``None`` replaced by the saved default."""
@@ -415,6 +445,10 @@ class CaptureRequest:
             hide=hide_window() if self.hide is None else bool(self.hide),
             clipboard=clipboard() if self.clipboard is None else bool(self.clipboard),
             source=self.source,
+            output=expand(self.output) if self.output else None,
+            name=self.name or None,
+            copies=_unique_folders(extra_folders() + list(self.copies or [])),
+            quiet=self.quiet,
         )
 
     def to_dict(self) -> dict:
@@ -436,6 +470,9 @@ class CaptureRequest:
             hide=d["hide"] if isinstance(d.get("hide"), bool) else None,
             clipboard=d["clipboard"] if isinstance(d.get("clipboard"), bool) else None,
             source=str(d.get("source") or "ipc"),
+            output=str(d["output"]) if d.get("output") else None,
+            name=str(d["name"]) if d.get("name") else None,
+            copies=[str(c) for c in d["copies"] if str(c).strip()] if isinstance(d.get("copies"), list) else None,
         )
 
 
@@ -474,6 +511,32 @@ def unique_path(directory: str, stem: str, suffix: str) -> str:
     return path
 
 
+def claim_path(tmp: str, directory: str, stem: str, suffix: str) -> str:
+    """Move the finished file *tmp* to the first free name (``stem``, ``stem_1``, ``stem_2``…).
+
+    The name is claimed with a hard link, which fails if the name exists, so two Crabture
+    processes saving at the same moment (parallel scripts) can never overwrite each other's
+    file.  On a filesystem without hard links (FAT, some network shares) it falls back to a
+    check-then-rename.  *tmp* is consumed.  Raises ``OSError`` if the folder is unwritable.
+    """
+    n = 0
+    while True:
+        path = os.path.join(directory, stem + suffix if n == 0 else f"{stem}_{n}{suffix}")
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            n += 1
+            continue
+        except (OSError, NotImplementedError, AttributeError):
+            if os.path.exists(path):
+                n += 1
+                continue
+            os.replace(tmp, path)
+            return path
+        _silent_remove(tmp)
+        return path
+
+
 def writable_folder(preferred: str) -> Tuple[str, str]:
     """Return ``(folder, note)``: *preferred* if it can be created and written to,
     otherwise the default folder, otherwise the system temp dir.  *note* explains
@@ -493,8 +556,13 @@ def writable_folder(preferred: str) -> Tuple[str, str]:
     return tempfile.gettempdir(), "no capture folder is writable — saved in the temporary folder"
 
 
-def save_pixmap(pixmap, directory: Optional[str] = None, mode: str = "region") -> Tuple[Optional[str], str]:
+def save_pixmap(pixmap, directory: Optional[str] = None, mode: str = "region",
+                name: Optional[str] = None) -> Tuple[Optional[str], str]:
     """Write *pixmap* using the saved name pattern and format.
+
+    *name* replaces the saved pattern for this one file (strftime codes and ``{mode}``).  If it ends
+    in a known image suffix (``.png`` ``.jpg`` …) that suffix chooses the format; an existing file
+    is never overwritten (``_1``, ``_2``… is added).
 
     Returns ``(path, note)``; *path* is None when saving failed, *note* describes
     a folder fallback or the failure.  The file appears atomically (written under
@@ -503,24 +571,112 @@ def save_pixmap(pixmap, directory: Optional[str] = None, mode: str = "region") -
     if pixmap is None or pixmap.isNull():
         return None, "nothing to save"
     target, note = writable_folder(directory or folder())
-    stem = render_name(pattern(), mode)
     wanted = image_format()
-    for fmt_key in ([wanted] if wanted == "png" else [wanted, "png"]):
-        qt_format, suffix = FORMATS[fmt_key]
-        path = unique_path(target, stem, suffix)
-        tmp = os.path.join(target, f".{os.path.basename(path)}.{uuid.uuid4().hex[:6]}.part")
-        if not pixmap.save(tmp, qt_format, quality() if fmt_key != "png" else -1):
+    stem_text, name_suffix = os.path.splitext((name or "").strip())
+    if name and name_suffix.lower() in OUTPUT_FORMATS:
+        stem = render_name(stem_text, mode)                 # the suffix chooses the format
+        attempts = [(OUTPUT_FORMATS[name_suffix.lower()], name_suffix, "")]
+    else:
+        stem = render_name(name or pattern(), mode)
+        attempts = [(FORMATS[k][0], FORMATS[k][1], k) for k in ([wanted] if wanted == "png" else [wanted, "png"])]
+    for qt_format, suffix, fmt_key in attempts:
+        tmp = os.path.join(target, f".{stem}{suffix}.{uuid.uuid4().hex[:6]}.part")
+        if not pixmap.save(tmp, qt_format, quality() if qt_format in ("JPEG", "WEBP") else -1):
             _silent_remove(tmp)
             continue                               # e.g. no WebP plugin: fall back to PNG
         try:
-            os.replace(tmp, path)
+            path = claim_path(tmp, target, stem, suffix)
         except OSError as e:
             _silent_remove(tmp)
             return None, f"could not write to {target}: {e.strerror or e}"
-        if fmt_key != wanted:
+        if fmt_key and fmt_key != wanted:
             note = (note + "; " if note else "") + f"{wanted.upper()} is not supported here — saved as PNG"
         return path, note
     return None, f"could not write to {target}"
+
+
+# Formats an explicit ``--output`` file name may use (suffix -> Qt writer name).
+OUTPUT_FORMATS: Dict[str, str] = {
+    ".png": "PNG", ".jpg": "JPEG", ".jpeg": "JPEG", ".webp": "WEBP", ".bmp": "BMP",
+}
+
+
+def resolve_output(text: str) -> Tuple[Optional[str], Optional[str], str]:
+    """Interpret a terminal ``--output`` argument.
+
+    Returns ``(folder, file, error)``: a folder (existing directory or text ending in a
+    slash: the usual name pattern is used inside it) or an exact file path.  A name without
+    a suffix gets the saved format's suffix.  *error* is non-empty for an unusable value.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return None, None, "the output path is empty"
+    full = expand(raw)
+    if raw.endswith(("/", os.sep)) or os.path.isdir(full):
+        return full, None, ""
+    suffix = os.path.splitext(full)[1].lower()
+    if not suffix:
+        return None, full + FORMATS[image_format()][1], ""
+    if suffix not in OUTPUT_FORMATS:
+        return None, None, (f"unsupported file type “{suffix}” "
+                            f"(use {', '.join(sorted(OUTPUT_FORMATS))}, or a folder)")
+    return None, full, ""
+
+
+def save_pixmap_to(pixmap, filepath: str) -> Tuple[Optional[str], str]:
+    """Write *pixmap* to exactly *filepath* (format from the suffix; an existing file is replaced).
+
+    Returns ``(path, note)``; *path* is None when saving failed.  Written atomically, like
+    :func:`save_pixmap`.
+    """
+    if pixmap is None or pixmap.isNull():
+        return None, "nothing to save"
+    path = expand(filepath)
+    qt_format = OUTPUT_FORMATS.get(os.path.splitext(path)[1].lower())
+    if qt_format is None:
+        return None, f"unsupported file type for {path}"
+    directory = os.path.dirname(path)
+    try:
+        os.makedirs(directory, exist_ok=True)
+    except OSError as e:
+        return None, f"could not create {directory}: {e.strerror or e}"
+    tmp = os.path.join(directory, f".{os.path.basename(path)}.{uuid.uuid4().hex[:6]}.part")
+    if not pixmap.save(tmp, qt_format, quality() if qt_format in ("JPEG", "WEBP") else -1):
+        _silent_remove(tmp)
+        return None, f"could not write {path} ({qt_format} may not be supported here)"
+    try:
+        os.replace(tmp, path)
+    except OSError as e:
+        _silent_remove(tmp)
+        return None, f"could not write {path}: {e.strerror or e}"
+    return path, ""
+
+
+def save_copies(source: str, folders) -> Tuple[List[str], List[str]]:
+    """Copy the saved file *source* into every folder of *folders*.
+
+    Returns ``(copied_paths, problems)``.  A folder that cannot be written to is reported
+    in *problems* and never stops the others (or the capture).  The copy keeps the file's
+    name; an existing file with that name is never overwritten (``_1``, ``_2``… is added).
+    """
+    copied: List[str] = []
+    problems: List[str] = []
+    stem, suffix = os.path.splitext(os.path.basename(source))
+    here = os.path.dirname(os.path.abspath(source))
+    for folder_ in _unique_folders(folders):
+        if folder_ == here:
+            continue                                   # that is where the original already is
+        try:
+            os.makedirs(folder_, exist_ok=True)
+            tmp = os.path.join(folder_, f".{stem}{suffix}.{uuid.uuid4().hex[:6]}.part")
+            try:
+                shutil.copyfile(source, tmp)
+                copied.append(claim_path(tmp, folder_, stem, suffix))
+            finally:
+                _silent_remove(tmp)
+        except OSError as e:
+            problems.append(f"could not copy to {folder_}: {e.strerror or e}")
+    return copied, problems
 
 
 def _silent_remove(path: str) -> None:

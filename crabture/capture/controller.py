@@ -12,7 +12,7 @@ per accepted request.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional
 
 from PyQt6.QtCore import QObject, Qt, pyqtSignal
@@ -31,6 +31,7 @@ class CaptureResult:
     pixmap: QPixmap
     path: str
     note: str = ""                    # e.g. "folder not writable — saved to the default folder"
+    copies: List[str] = field(default_factory=list)   # extra copies written to the other locations
     notification: Optional[QObject] = None   # pending desktop notification, if one was sent
 
 
@@ -93,19 +94,28 @@ class CaptureController(QObject):
             clip = QApplication.clipboard()
             if clip is not None:
                 clip.setPixmap(pixmap)
-        path, note = config.save_pixmap(pixmap, req.folder, mode)
+        if req.output:                                # terminal: exactly this file, no fallback folder
+            path, note = config.save_pixmap_to(pixmap, req.output)
+        else:
+            path, note = config.save_pixmap(pixmap, req.folder, mode, req.name)
         log(f"saved -> {path} {note}".strip())
         if not path:
             extra = " It was copied to the clipboard." if req.clipboard else ""
             self.failed.emit(f"The screenshot was taken but could not be saved ({note}).{extra}", req)
             return
-        result = CaptureResult(request=req, pixmap=pixmap, path=path, note=note)
+        copies, problems = config.save_copies(path, req.copies or [])
+        if problems:
+            log("copies: " + "; ".join(problems))
+            note = "; ".join(([note] if note else []) + problems)
+        result = CaptureResult(request=req, pixmap=pixmap, path=path, note=note, copies=copies)
         # GNOME's own picker already announces its screenshot; don't add a second notification.
         own_notice = self._service.last_source != "portal-interactive"
-        if req.after == "save" and config.notify() and own_notice:
+        if req.after == "save" and config.notify() and own_notice and not req.quiet:
             from crabture.capture.notify import notify
             where = os.path.dirname(path).replace(os.path.expanduser("~"), "~")
             body = f"{os.path.basename(path)}\nSaved in {where}"
+            if copies:
+                body += f"\n+ {len(copies)} cop{'y' if len(copies) == 1 else 'ies'} in other folders"
             if req.clipboard:
                 body += "\nCopied to the clipboard"
             if note:

@@ -111,6 +111,32 @@ class StartupLock:
             self.held = False
 
 
+class CaptureLock:
+    """Makes terminal captures take turns, across processes.
+
+    The desktop's screenshot service answers one request at a time; when several scripts (or one
+    script running jobs in parallel) call ``crabture --capture`` together, all but one would wait for
+    a long time-out.  A one-shot capture holds this lock while it grabs, the others queue behind it.
+    The lock of a process that died is detected and ignored (there is no time limit on a live holder:
+    an on-screen region selection may take as long as the user needs).
+    """
+
+    def __init__(self) -> None:
+        import tempfile
+        self._lock = QLockFile(os.path.join(tempfile.gettempdir(), f"crabture-capture-{osinfo.user_id()}.lock"))
+        self._lock.setStaleLockTime(0)
+        self.held = False
+
+    def acquire(self, timeout_s: float) -> bool:
+        self.held = self._lock.tryLock(int(timeout_s * 1000))
+        return self.held
+
+    def release(self) -> None:
+        if self.held:
+            self._lock.unlock()
+            self.held = False
+
+
 class CommandServer(QObject):
     """Listens for commands from other ``crabture`` processes."""
 

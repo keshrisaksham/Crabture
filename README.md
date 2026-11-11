@@ -20,6 +20,8 @@ It captures your screen (X11 *and* Wayland, because apparently we can't have nic
 - A shortcut, tray or command-line capture **never hides or pops up Crabture's own window**, so you can screenshot Crabture itself (region, full screen or window). Only captures started from Crabture's own buttons and menus hide it first (switch that off with *Hide the Crabture window while capturing* in Configure ▸ Capture).
 - Options for a **delay** (our own window hides *before* the countdown, so you can set the scene), **copy to clipboard**, and **region capture on mouse release**.
 - From the command line: `crabture --capture region|fullscreen|window|monitor|scroll [--delay S] [--folder DIR] [--after editor|save] [--clipboard]`.
+- **Terminal / script friendly.** `--output FILE` (or `-o`) writes the shot to exactly that file (`.png .jpg .webp .bmp`), or into a folder if you pass a directory. `--name NAME` (or `-n`) sets just the file name for one shot (`%Y-%m-%d` codes and `{mode}` work, a `.png`/`.jpg`/`.webp` ending picks the format). `--print-path` (`-p`) waits for the capture, prints the saved path on stdout and exits `0` (saved), `1` (failed) or `2` (cancelled), with no notification and no hand-off to a running Crabture, so `path=$(crabture --capture region -p)` just works. It is safe to run several at once (parallel jobs queue for the desktop's screenshot service and can never overwrite each other's file), and Ctrl+C / `kill` ends it cleanly (exit `130` / `143`).
+- **Save to several places at once.** `--copy-to DIR` (repeatable) also drops a copy in each folder, and Configure ▸ Capture has an *Also save a copy to* list that does the same for every capture. A folder that can't be written to is skipped (and reported) without losing the shot. Each shortcut can still have its own folder too.
 - `crabture --register-hotkeys` applies the shortcuts saved in Configure ▸ Capture. It **never overwrites** one you already use. We're not monsters.
 
 ### 🖍 Annotation tools
@@ -175,6 +177,10 @@ crabture --directory ~/Pictures   # show a folder in the gallery (-d)
 crabture --capture region         # take a screenshot straight away
 crabture --capture window --delay 3
 crabture --capture fullscreen --after save --folder ~/Work/shots   # no window, just a file (and a notification)
+crabture --capture fullscreen -o ~/shot.png                      # exact file, path printed, exit code tells you how it went
+crabture --capture region -o ~/Work/ --copy-to /mnt/share --copy-to ~/Backup   # one shot, three locations
+crabture --capture region --folder ~/Work -n "bug_%Y-%m-%d_{mode}"   # name just this one
+crabture --capture window --delay 3 -p                           # 3 s to leave the terminal; prints where the file went
 crabture --register-hotkeys       # give the shortcuts from Configure ▸ Capture to GNOME / Xfce
 crabture --unregister-hotkeys     # remove only the shortcuts Crabture added
 crabture --install-integration    # add the right-click entries to Nautilus (--remove-integration undoes it)
