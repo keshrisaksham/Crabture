@@ -1,6 +1,4 @@
-# 🦀 Crabture — Yet Another Screenshot Tool (But WAY BETTER!)
-
-**Crabture** is a ShareX-style screenshot tool for Debian, Kali and other Linux desktops (and Windows, if you're brave). Yes, there are a hundred of these already. None of them were *this* crab-themed.
+# 🦀 Crabture 
 
 It **captures** your screen (X11 *and* Wayland, because we can't have nice things in just one), lets you **annotate** it, makes it look professional with **effects**, **redacts** the API key you just leaked, and **renames** the pile of `Screenshot from 2026-10-12 19-19-10 (3).png` files you'll inevitably collect. Built with **PyQt6** and held together by optimism. There is no test suite. Yet.
 
