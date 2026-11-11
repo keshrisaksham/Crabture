@@ -141,10 +141,6 @@ scripts/ packaging/     builder, .deb, Windows installer, man page, Nautilus scr
 
 Prerequisites: Python 3.10+, PyQt6. Optional but wanted: `tesseract-ocr` (redaction); on Linux `xdotool` (X11 window capture, auto-scroll) and `maim`/`scrot`/`gnome-screenshot`/`grim` (extra backends).
 
-## 🤷 Honest disclaimers
-
-Mostly tested headless with mocks, so your real desktop remains the final boss. The Windows port was written and unit-tested on Linux (Win32 calls mocked); a real Windows machine hasn't had its say. Region and window picking need a real screen and a real human. OCR quality depends on how `tesseract` feels about your screenshot that day.
-
 ## 📜 Licence
 
 **GPL-3.0-or-later**, full text in [`LICENSE`](LICENSE). Use it, change it, share it; if you distribute a modified version, share the source too. No warranty: if Crabture blurs the wrong thing, that one's on you. (It's GPL because PyQt6 is GPLv3; something more permissive means a commercial PyQt licence or PySide6.)
